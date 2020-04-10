@@ -83,7 +83,7 @@ class MolGVAE(ChemModel):
                                 18: [0, 2, 4, 6, 8, 10, 12, 14, 16],
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
-                        'num_timesteps': 12,                                    # gnn propagation step
+                        'num_timesteps': 5,                                    # gnn propagation step
                         'hidden_size_decoder': 200,                             # decoder hidden size dimension
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
                         "kl_trade_off_lambda": 0.3,                             # kl tradeoff originale 0.3
@@ -101,7 +101,9 @@ class MolGVAE(ChemModel):
                         'reconstruction_en': 20,            # number of encoding in reconstruction
                         'reconstruction_dn': 1,             # number of decoding in reconstruction
 
-                        'use_graph': True,                  # use gnn
+                        'use_graph': False,                  # use gnn
+                        'use_gin': True,                    # use gin as gnn
+                        'gin_epsilon': 0,                   # gin epsilon
                         "label_one_hot": False,             # one hot label or not
                         "multi_bfs_path": False,            # whether sample several BFS paths for each molecule
                         "bfs_path_count": 30,
@@ -163,9 +165,41 @@ class MolGVAE(ChemModel):
         # overlapped edge features
         self.placeholders['overlapped_edge_features']=tf.placeholder(tf.int32, [None, None, None], name='overlapped_edge_features') # [b, es, v]
 
-        # weights for encoder and decoder GNN. 
-        if self.params["residual_connection_on"]:
-            # weights for encoder and decoder GNN. Different weights for each iteration
+        # weights for encoder and decoder GNN.
+        if self.params['use_graph']:
+            if self.params["residual_connection_on"]:
+                # weights for encoder and decoder GNN. Different weights for each iteration
+                for scope in ['_encoder', '_decoder']:
+                    if scope == '_encoder':
+                        new_h_dim = h_dim_en
+                    else:
+                        new_h_dim = expanded_h_dim
+                        # For each GNN iteration
+                    for iter_idx in range(self.params['num_timesteps']):
+                        with tf.variable_scope("gru_scope"+scope+str(iter_idx), reuse=False):
+                            self.weights['edge_weights'+scope+str(iter_idx)] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
+                            if self.params['use_edge_bias']:
+                                self.weights['edge_biases'+scope+str(iter_idx)] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+
+                            cell = tf.contrib.rnn.GRUCell(new_h_dim)
+                            cell = tf.nn.rnn_cell.DropoutWrapper(cell, state_keep_prob=self.placeholders['graph_state_keep_prob'])
+                            self.weights['node_gru'+scope+str(iter_idx)] = cell
+            else:
+                for scope in ['_encoder', '_decoder']:
+                    if scope == '_encoder':
+                        new_h_dim= h_dim_en
+                    else:
+                        new_h_dim=expanded_h_dim
+                    self.weights['edge_weights'+scope] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
+                    if self.params['use_edge_bias']:
+                        self.weights['edge_biases'+scope] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+                    with tf.variable_scope("gru_scope"+scope):
+                        cell = tf.contrib.rnn.GRUCell(new_h_dim)
+                        cell = tf.nn.rnn_cell.DropoutWrapper(cell,
+                                                             state_keep_prob=self.placeholders['graph_state_keep_prob'])
+                        self.weights['node_gru'+scope] = cell
+        elif self.params['use_gin']:
+            self.weights['gin_epsilon'] = tf.constant(self.params['gin_epsilon'], tf.float32)
             for scope in ['_encoder', '_decoder']:
                 if scope == '_encoder':
                     new_h_dim = h_dim_en
@@ -173,28 +207,18 @@ class MolGVAE(ChemModel):
                     new_h_dim = expanded_h_dim
                     # For each GNN iteration
                 for iter_idx in range(self.params['num_timesteps']):
-                    with tf.variable_scope("gru_scope"+scope+str(iter_idx), reuse=False):
-                        self.weights['edge_weights'+scope+str(iter_idx)] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
+                    with tf.variable_scope("gin_scope" + scope + str(iter_idx), reuse=False):
+                        self.weights['edge_weights' + scope + str(iter_idx)] = tf.Variable(
+                            glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
                         if self.params['use_edge_bias']:
-                            self.weights['edge_biases'+scope+str(iter_idx)] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+                            self.weights['edge_biases' + scope + str(iter_idx)] = tf.Variable(
+                                np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+                        self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
+                                                                      new_h_dim,
+                                                                      [new_h_dim, new_h_dim],
+                                                                      self.placeholders['out_layer_dropout_keep_prob'])
 
-                        cell = tf.contrib.rnn.GRUCell(new_h_dim)
-                        cell = tf.nn.rnn_cell.DropoutWrapper(cell, state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                        self.weights['node_gru'+scope+str(iter_idx)] = cell
-        else:
-            for scope in ['_encoder', '_decoder']:
-                if scope == '_encoder':
-                    new_h_dim= h_dim_en
-                else:
-                    new_h_dim=expanded_h_dim
-                self.weights['edge_weights'+scope] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
-                if self.params['use_edge_bias']:
-                    self.weights['edge_biases'+scope] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
-                with tf.variable_scope("gru_scope"+scope):
-                    cell = tf.contrib.rnn.GRUCell(new_h_dim)
-                    cell = tf.nn.rnn_cell.DropoutWrapper(cell,
-                                                         state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                    self.weights['node_gru'+scope] = cell
+
 
         # Weights final part encoder. They map all nodes in one point in the latent space
         self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en, h_dim_en]), name="mean_weights")
@@ -314,6 +338,36 @@ class MolGVAE(ChemModel):
                 acts = tf.reshape(acts, [-1, h_dim])                                                    # [b*v, h]
                 h = node_gru(acts, h)[1]                                                                # [b*v, h]
             last_h = tf.reshape(h, [-1, v, h_dim])
+        return last_h
+
+
+    def compute_final_node_with_GIN(self, h, adj, scope_name):  # scope_name: _encoder or _decoder
+        # h: initial representation, adj: adjacency matrix, different GNN parameters for encoder and decoder
+        v = self.placeholders['num_vertices']
+        # _decoder uses a larger latent space because concat of symbol and latent representation
+        if scope_name=="_decoder":
+            h_dim = self.params['hidden_size_encoder'] + self.params['hidden_size_decoder'] + 1
+        else:
+            h_dim = self.params['hidden_size_encoder']
+        h = tf.reshape(h, [-1, h_dim])  # [b*v, h]
+        for iter_idx in range(self.params['num_timesteps']):
+            with tf.variable_scope("gin_scope"+scope_name+str(iter_idx), reuse=None) as g_scope:
+                for edge_type in range(self.num_edge_types):
+                    # the message passed from this vertice to other vertices
+                    m = tf.matmul(h, self.weights['edge_weights'+scope_name+str(iter_idx)][edge_type])  # [b*v, h]
+                    if self.params['use_edge_bias']:
+                        m += self.weights['edge_biases'+scope_name+str(iter_idx)][edge_type]            # [b, v, h]
+                    m = tf.reshape(m, [-1, v, h_dim])                                                   # [b, v, h]
+                    # collect the messages from other vertices to each vertice
+                    if edge_type == 0:
+                        acts = tf.matmul(adj[edge_type], m)
+                    else:
+                        acts += tf.matmul(adj[edge_type], m)
+                # all messages collected for each node
+                acts = tf.reshape(acts, [-1, h_dim])                                                    # [b*v, h]
+                input = tf.multiply((1 + self.weights['gin_epsilon']), h) + acts
+                h = self.weights['mlp' + scope_name + str(iter_idx)](input)
+        last_h = tf.reshape(h, [-1, v, h_dim])
         return last_h
 
     def compute_mean_and_logvariance(self):
@@ -623,6 +677,10 @@ class MolGVAE(ChemModel):
                                                 self.weights['edge_weights_decoder'],
                                                 self.weights['edge_biases_decoder'],
                                                 self.weights['node_gru_decoder'], "gru_scope_decoder") # [b, v, h + h]
+        elif self.params['use_gin']:
+            new_filtered_z_sampled = self.compute_final_node_with_GIN(filtered_z_sampled,
+                                                                      tf.transpose(incre_adj_mat,[1, 0, 2, 3]),
+                                                                      "_decoder")  # [b, v, h + h]
         else:
             new_filtered_z_sampled = filtered_z_sampled
         # Filter nonexist nodes

@@ -191,6 +191,10 @@ class ChemModel(object):
                         initial_state,
                         tf.transpose(self.placeholders['adjacency_matrix'], [1, 0, 2, 3]), self.weights['edge_weights_encoder'],
                         self.weights['edge_biases_encoder'], self.weights['node_gru_encoder'], "gru_scope_encoder")
+            elif self.params['use_gin']:
+                self.ops['final_node_representations'] = self.compute_final_node_with_GIN(
+                    initial_state,
+                    tf.transpose(self.placeholders['adjacency_matrix'], [1, 0, 2, 3]), "_encoder")
             else:
                 self.ops['final_node_representations'] = initial_state
 

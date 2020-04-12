@@ -69,7 +69,7 @@ class MolGVAE(ChemModel):
                         'maximum_distance': 50,
                         "use_argmax_nodes": False,                      # use random sampling or argmax during node sampling
                         "use_argmax_bonds": False,                      # use random sampling or argmax during bonds generations
-                        'use_mask': False,                              # true to use node mask
+                        'use_mask': True,                              # true to use node mask
                         'residual_connection_on': True,                 # whether residual connection is on
                         'residual_connections': {
                                 2: [0],
@@ -419,7 +419,8 @@ class MolGVAE(ChemModel):
         # save the embedding representations of the atoms
         self.ops['initial_nodes_decoder'] = init_h_states
         self.ops['node_symbol_prob'] = nodes_type_probs
-        self.ops['sampled_atoms'] = atoms
+        # self.ops['sampled_atoms'] = atoms
+        self.ops['sampled_atoms'] = tf.one_hot(tf.squeeze(atoms), self.params['num_symbols'])
 
 
     """
@@ -497,7 +498,7 @@ class MolGVAE(ChemModel):
                               lambda: fx_prob)
 
         #probs_value = tf.Print(probs_value, [probs_value], message="training: probs_value", summarize=1000)  # TODO: pr
-        s_atom = self.sample_atom(probs_value)
+        s_atom = self.sample_atom(probs_value, True)
         # s_atom = tf.Print(s_atom, [s_atom], message="training: s_atom ", summarize=1000)  # TODO: pr
         current_new_hist = self.update_hist(updated_hist, s_atom)
         #current_new_hist = tf.Print(current_new_hist, [current_new_hist], message="training: current_new_hist", summarize=1000)  # TODO: pr
@@ -526,7 +527,7 @@ class MolGVAE(ChemModel):
         if self.params['use_mask']:
             fx_logit = self.mask_mols(fx_logit, hist_diff_pos)
         fx_prob = tf.nn.softmax(fx_logit)
-        s_atom = self.sample_atom(fx_prob)
+        s_atom = self.sample_atom(fx_prob, False)
         new_updated_hist = self.update_hist(updated_hist, s_atom)
 
         # sampling one compatible histogram with the current new histogram
@@ -583,15 +584,17 @@ class MolGVAE(ChemModel):
 
 
     """
-    Sample the id of the atom for a value fo probabilities. In teacher forcing use argmax
+    Sample the id of the atom for a value fo probabilities. 
+    In training always apply argmax, while in generation it is possible to choose among distribution or argmax
     """
-    def sample_atom(self, fx_prob):
-        if self.params['use_argmax_nodes']:
-            idx = tf.argmax(fx_prob, output_type=tf.int32)
+    def sample_atom(self, fx_prob, training):
+        if training:
+                idx = tf.argmax(fx_prob, output_type=tf.int32)
         else:
-            idx = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
-                          lambda: tf.argmax(fx_prob, output_type=tf.int32),
-                          lambda: tf.distributions.Categorical(probs=fx_prob).sample())
+            if self.params['use_argmax_nodes']:
+                idx = tf.argmax(fx_prob, output_type=tf.int32)
+            else:
+                idx = tf.distributions.Categorical(probs=fx_prob).sample()
         return idx
 
     """
@@ -643,8 +646,15 @@ class MolGVAE(ChemModel):
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         batch_size = tf.shape(self.placeholders['initial_node_representation'])[0]
-        # using teacher forcing on the type of the atoms. We still use the embedding of the atoms generated with the new drigoni function
-        latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"])
+        # We still use the embedding of the atoms generated with the new drigoni function
+        # If we are doing reconstruction or training we use the atoms sampled in the nodes procdeure
+        # Note: If we use the TF in the node procedure, the sampled atoms are equal to the GT
+        #latent_node_nodes = tf.cond(self.placeholders['is_generative'],
+        #                      lambda: self.placeholders["latent_node_symbols"],
+        #                      lambda: self.ops['sampled_atoms'])
+        #latent_node_state = self.get_node_embedding_state(latent_node_nodes)
+
+        latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"]) #original
         # concat nodes with node symbols and use latent representation as decoder GNN'input
         self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
                                                                                 latent_node_state], axis=2)   # [b, v, h + h]
@@ -769,6 +779,9 @@ class MolGVAE(ChemModel):
         # Node symbol loss
         self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * 
                                                       self.placeholders['node_symbols'], axis=[1, 2])
+
+        self.ops['error'] = tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
+
         # Add in the loss for calculating QED
         for (internal_id, task_id) in enumerate(self.params['task_ids']):
             with tf.variable_scope("out_layer_task%i" % task_id):

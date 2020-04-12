@@ -16,7 +16,6 @@ Options:
 
 from docopt import docopt
 import traceback
-import pdb
 import sys
 from model.GGNN_core import ChemModel
 from model.data_augmentation import *
@@ -69,7 +68,7 @@ class MolGVAE(ChemModel):
                         'maximum_distance': 50,
                         "use_argmax_nodes": False,                      # use random sampling or argmax during node sampling
                         "use_argmax_bonds": False,                      # use random sampling or argmax during bonds generations
-                        'use_mask': True,                              # true to use node mask
+                        'use_mask': False,                              # true to use node mask
                         'residual_connection_on': True,                 # whether residual connection is on
                         'residual_connections': {
                                 2: [0],
@@ -120,6 +119,7 @@ class MolGVAE(ChemModel):
 
     def prepare_specific_graph_model(self) -> None:
         # params
+        num_symbols = self.params['num_symbols']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         expanded_h_dim = h_dim_de + h_dim_en + 1  # 1 for focus bit
@@ -127,7 +127,7 @@ class MolGVAE(ChemModel):
 
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
         self.placeholders['edge_weight_dropout_keep_prob'] = tf.placeholder(tf.float32, None, name='edge_weight_dropout_keep_prob')
-        self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, None, h_dim_en], name='node_features')  # padded node symbols
+        self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, None, num_symbols], name='initial_node_representation')  # num_symbols
         # mask out invalid node
         self.placeholders['node_mask'] = tf.placeholder(tf.float32, [None, None], name='node_mask')  # [b x v]
         self.placeholders['num_vertices'] = tf.placeholder(tf.int32, (), name="num_vertices")
@@ -417,8 +417,9 @@ class MolGVAE(ChemModel):
         self.ops['initial_nodes_decoder'] = init_h_states
         self.ops['node_symbol_prob'] = nodes_type_probs
         self.ops['sampled_atoms'] = atoms
-        self.ops['latent_node_symbols'] = tf.one_hot(tf.squeeze(self.ops['sampled_atoms']), self.params['num_symbols'],
+        self.ops['latent_node_symbols'] = tf.one_hot(tf.squeeze(self.ops['sampled_atoms'], axis=-1), self.params['num_symbols'],
                                                      name='latent_node_symbols')
+        # self.ops['latent_node_symbols'] = tf.Print(self.ops['latent_node_symbols'], [tf.shape(self.ops['latent_node_symbols']), self.ops['latent_node_symbols']], message="latent_node_symbols ", summarize=1000)
 
 
     """
@@ -931,11 +932,6 @@ class MolGVAE(ChemModel):
 
         return (bucketed, bucket_sizes, bucket_at_step)
 
-    def pad_annotations(self, annotations):
-        return np.pad(annotations,
-                       pad_width=[[0, 0], [0, 0], [0, self.params['hidden_size_encoder'] - self.params["num_symbols"]]],
-                       mode='constant')
-
     def make_batch(self, elements, maximum_vertice_num):
         # get maximum number of iterations in this batch. used to control while_loop
         max_iteration_num=-1
@@ -1033,9 +1029,9 @@ class MolGVAE(ChemModel):
             self.placeholders['z_prior']: random_normal_states, # [1, v, h]
             self.placeholders['incre_adj_mat']: incre_adj_mat,  # [1, 1, e, v, v]
             self.placeholders['num_vertices']: num_vertices,  # v
-            self.placeholders['initial_node_representation']: self.pad_annotations([elements['init']]),
+            self.placeholders['initial_node_representation']: [elements['init']],
             self.placeholders['node_symbols']: [elements['init']],
-            self.ops['latent_node_symbols']: self.pad_annotations(latent_node_symbol),
+            self.ops['latent_node_symbols']: latent_node_symbol,
             self.placeholders['adjacency_matrix']: [elements['adj_mat']],
             self.placeholders['node_mask']: [elements['mask']],
 
@@ -1083,9 +1079,9 @@ class MolGVAE(ChemModel):
         return {
                 self.placeholders['incre_adj_mat']: incre_adj_mat,  # [1, 1, e, v, v]
                 self.placeholders['num_vertices']: num_vertices,  # v
-                self.placeholders['initial_node_representation']: self.pad_annotations([elements['init']]),  # only for batch size
+                self.placeholders['initial_node_representation']: [elements['init']],  # only for batch size
                 self.ops['initial_nodes_decoder']: latent_nodes,
-                self.ops['latent_node_symbols']: self.pad_annotations(latent_node_symbol),
+                self.ops['latent_node_symbols']: latent_node_symbol,
                 self.placeholders['adjacency_matrix']: [elements['adj_mat']],
                 self.placeholders['node_mask']: [elements['mask']],
                 self.placeholders['graph_state_keep_prob']: 1,
@@ -1108,7 +1104,7 @@ class MolGVAE(ChemModel):
                 self.placeholders['z_prior']: latent_points,  # [hl]
                 self.placeholders['num_vertices']: num_vertices,  # v
                 self.placeholders['node_mask']: [elements['mask']],
-                self.placeholders['initial_node_representation']: self.pad_annotations([elements['init']]),
+                self.placeholders['initial_node_representation']: [elements['init']],
                 self.placeholders['node_symbols']: [elements['init']],
                 self.placeholders['adjacency_matrix']: [elements['adj_mat']],
                 self.placeholders['graph_state_keep_prob']: 1,
@@ -1472,7 +1468,6 @@ class MolGVAE(ChemModel):
 
             num_graphs = len(batch_data['init'])
             initial_representations = batch_data['init']
-            initial_representations = self.pad_annotations(initial_representations)
             batch_feed_dict = {
                 self.placeholders['initial_node_representation']: initial_representations,
                 self.placeholders['node_symbols']: batch_data['init'],
@@ -1514,7 +1509,6 @@ if __name__ == "__main__":
     except:
         typ, value, tb = sys.exc_info()
         traceback.print_exc()
-        pdb.post_mortem(tb)
     finally:
         end = time.time()
         print("Time for the overall execution: " + model.get_time_diff(end, start))

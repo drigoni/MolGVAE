@@ -290,7 +290,7 @@ class ChemModel(object):
         error = -10000000
         start_time = time.time()
         processed_graphs = 0
-        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=1) #self.params['batch_size'])
+        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=self.params['batch_size']) #self.params['batch_size'])
 
         for step, batch_data in enumerate(batch_iterator):
             num_graphs = batch_data[self.placeholders['num_graphs']]
@@ -309,7 +309,7 @@ class ChemModel(object):
                               self.ops['qed_computed_values'], self.placeholders['target_values'], self.ops['total_qed_loss'],
                               self.ops['mean'], self.ops['logvariance'],
                               self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'], 
-                              self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'], self.ops['sampled_atoms'],]
+                              self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'], self.ops['sampled_atoms']]
             else:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
@@ -324,6 +324,7 @@ class ChemModel(object):
                 mean_kl_loss += result[14] * num_graphs
                 mean_qed_loss += result[15] * num_graphs
             else:
+                """
                 # todo ricorda di mettere il =+, togliere il todo in make iterators e IF sottostante
                 mean_edge_loss = result[1] * num_graphs
                 mean_node_loss = result[2] * num_graphs
@@ -351,9 +352,7 @@ class ChemModel(object):
                 exit(0)
                 # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
                 # exit(0)  # TODO: exit
-
-
-            """
+                """
                 mean_edge_loss += result[1] * num_graphs
                 mean_node_loss += result[2] * num_graphs
                 mean_kl_loss += result[3] * num_graphs
@@ -370,7 +369,6 @@ class ChemModel(object):
 
             # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
             # exit(0)  # TODO: exit
-            """
 
 
 
@@ -435,17 +433,17 @@ class ChemModel(object):
                 elif self.params['generation'] == 2:
                     self.reconstruction(self.test_data)
                 elif self.params['generation'] == 3:  # validation only
-                    #loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
-                    #    self.run_epoch("epoch %i (training)" % epoch, epoch, self.train_data, False)
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                        self.run_epoch("epoch %i (training)" % epoch, epoch, self.train_data, False)
 
-                    #print("\r\x1b[K Train loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                    #      (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Train loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
 
-                    #loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
-                    #    self.run_epoch("epoch %i (valid)" % epoch, epoch, self.valid_data, False)
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                        self.run_epoch("epoch %i (valid)" % epoch, epoch, self.valid_data, False)
 
-                    #print("\r\x1b[K Valid loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                    #      (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Valid loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
 
                     loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
                         self.run_epoch("epoch %i (test)" % epoch, epoch, self.test_data, False)

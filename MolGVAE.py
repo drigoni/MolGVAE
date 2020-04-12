@@ -135,9 +135,6 @@ class MolGVAE(ChemModel):
         self.placeholders['adjacency_matrix'] = tf.placeholder(tf.float32, [None, self.num_edge_types, None, None], name="adjacency_matrix")  # [b, e, v, v]
         # labels for node symbol prediction
         self.placeholders['node_symbols'] = tf.placeholder(tf.float32, [None, None, self.params['num_symbols']])  # [b, v, edge_type]
-        # node symbols used to enhance latent representations
-        self.placeholders['latent_node_symbols'] = tf.placeholder(tf.float32, 
-                                                      [None, None, h_dim_en], name='latent_node_symbol')  # [b, v, h]
         # mask out cross entropies in decoder
         self.placeholders['iteration_mask']=tf.placeholder(tf.float32, [None, None]) # [b, es]
         # adj matrices used in decoder
@@ -419,8 +416,9 @@ class MolGVAE(ChemModel):
         # save the embedding representations of the atoms
         self.ops['initial_nodes_decoder'] = init_h_states
         self.ops['node_symbol_prob'] = nodes_type_probs
-        # self.ops['sampled_atoms'] = atoms
-        self.ops['sampled_atoms'] = tf.one_hot(tf.squeeze(atoms), self.params['num_symbols'])
+        self.ops['sampled_atoms'] = atoms
+        self.ops['latent_node_symbols'] = tf.one_hot(tf.squeeze(self.ops['sampled_atoms']), self.params['num_symbols'],
+                                                     name='latent_node_symbols')
 
 
     """
@@ -649,12 +647,10 @@ class MolGVAE(ChemModel):
         # We still use the embedding of the atoms generated with the new drigoni function
         # If we are doing reconstruction or training we use the atoms sampled in the nodes procdeure
         # Note: If we use the TF in the node procedure, the sampled atoms are equal to the GT
-        #latent_node_nodes = tf.cond(self.placeholders['is_generative'],
-        #                      lambda: self.placeholders["latent_node_symbols"],
-        #                      lambda: self.ops['sampled_atoms'])
-        #latent_node_state = self.get_node_embedding_state(latent_node_nodes)
 
-        latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"]) #original
+        latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
+
+        #latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"]) #original
         # concat nodes with node symbols and use latent representation as decoder GNN'input
         self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
                                                                                 latent_node_state], axis=2)   # [b, v, h + h]
@@ -1039,7 +1035,7 @@ class MolGVAE(ChemModel):
             self.placeholders['num_vertices']: num_vertices,  # v
             self.placeholders['initial_node_representation']: self.pad_annotations([elements['init']]),
             self.placeholders['node_symbols']: [elements['init']],
-            self.placeholders['latent_node_symbols']: self.pad_annotations(latent_node_symbol),
+            self.ops['latent_node_symbols']: self.pad_annotations(latent_node_symbol),
             self.placeholders['adjacency_matrix']: [elements['adj_mat']],
             self.placeholders['node_mask']: [elements['mask']],
 
@@ -1089,7 +1085,7 @@ class MolGVAE(ChemModel):
                 self.placeholders['num_vertices']: num_vertices,  # v
                 self.placeholders['initial_node_representation']: self.pad_annotations([elements['init']]),  # only for batch size
                 self.ops['initial_nodes_decoder']: latent_nodes,
-                self.placeholders['latent_node_symbols']: self.pad_annotations(latent_node_symbol),
+                self.ops['latent_node_symbols']: self.pad_annotations(latent_node_symbol),
                 self.placeholders['adjacency_matrix']: [elements['adj_mat']],
                 self.placeholders['node_mask']: [elements['mask']],
                 self.placeholders['graph_state_keep_prob']: 1,
@@ -1480,7 +1476,6 @@ class MolGVAE(ChemModel):
             batch_feed_dict = {
                 self.placeholders['initial_node_representation']: initial_representations,
                 self.placeholders['node_symbols']: batch_data['init'],
-                self.placeholders['latent_node_symbols']: initial_representations,                
                 self.placeholders['target_values']: np.transpose(batch_data['labels'], axes=[1,0]),
                 self.placeholders['target_mask']: np.transpose(batch_data['task_masks'], axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs,

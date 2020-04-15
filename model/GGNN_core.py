@@ -184,7 +184,7 @@ class ChemModel(object):
         with tf.variable_scope("graph_model"):
             self.prepare_specific_graph_model()
 
-            initial_state = self.get_node_embedding_state(self.placeholders['initial_node_representation'])
+            initial_state = self.get_node_embedding_state(self.placeholders['node_symbols'])
 
             # This does the actual graph work:
             if self.params['use_graph']:
@@ -287,7 +287,8 @@ class ChemModel(object):
         mean_node_loss = 0
         mean_kl_loss = 0
         mean_qed_loss = 0
-        error = -10000000
+        node_loss_error = -10000000
+        node_pred_error = 0
         start_time = time.time()
         processed_graphs = 0
         batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=self.params['batch_size']) #self.params['batch_size'])
@@ -309,12 +310,13 @@ class ChemModel(object):
                               self.ops['qed_computed_values'], self.placeholders['target_values'], self.ops['total_qed_loss'],
                               self.ops['mean'], self.ops['logvariance'],
                               self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'], 
-                              self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'], self.ops['sampled_atoms']]
+                              self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'],
+                              self.ops['node_loss_error'], self.ops['node_pred_error']]
             else:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['sampled_atoms'],
-                              self.ops['error'], self.ops['node_symbol_loss']]
+                              self.ops['node_loss_error'], self.ops['node_pred_error']]
             result = self.sess.run(fetch_list, feed_dict=batch_data)
             batch_loss = result[0]
             loss += batch_loss * num_graphs
@@ -323,49 +325,27 @@ class ChemModel(object):
                 mean_node_loss += result[13] * num_graphs
                 mean_kl_loss += result[14] * num_graphs
                 mean_qed_loss += result[15] * num_graphs
+                node_loss_error = max(node_loss_error, np.max(result[17]))
+                node_pred_error += result[18]
             else:
-                """
-                # todo ricorda di mettere il =+, togliere il todo in make iterators e IF sottostante
-                mean_edge_loss = result[1] * num_graphs
-                mean_node_loss = result[2] * num_graphs
-                mean_kl_loss = result[3] * num_graphs
-                mean_qed_loss = result[4] * num_graphs
-                # error = max(error, max(result[6]))
-                error = max(error, max(result[-1]))
-
-            print(
-                "Running %s, batch %i (has %i graphs). Total loss: %.4f. Edge loss: %.4f. Node loss: %.4f. KL loss: %.4f. Property loss: %.4f. Max: %f." % (
-                epoch_name,
-                step,
-                num_graphs,
-                loss / processed_graphs,
-                mean_edge_loss / processed_graphs,
-                mean_node_loss / processed_graphs,
-                mean_kl_loss / processed_graphs,
-                mean_qed_loss / processed_graphs,
-                error), end='\r')
-
-            if error >= 30.000:
-                print()
-                print('atoms:', [utils.dataset_info('qm9')['atom_types'][i[0]] for i in result[5][0]])
-                print('loss:', result[6])
-                exit(0)
-                # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
-                # exit(0)  # TODO: exit
-                """
                 mean_edge_loss += result[1] * num_graphs
                 mean_node_loss += result[2] * num_graphs
                 mean_kl_loss += result[3] * num_graphs
                 mean_qed_loss += result[4] * num_graphs
+                node_loss_error = max(node_loss_error, np.max(result[6]))
+                node_pred_error += result[7]
 
-            print("Running %s, batch %i (has %i graphs). Total loss: %.4f. Edge loss: %.4f. Node loss: %.4f. KL loss: %.4f. Property loss: %.4f. " % (epoch_name,
-                                                                                                                                                  step,
-                                                                                                                                                  num_graphs,
-                                                                                                                                                  loss / processed_graphs,
-                                                                                                                                                  mean_edge_loss / processed_graphs,
-                                                                                                                                                  mean_node_loss / processed_graphs,
-                                                                                                                                                  mean_kl_loss / processed_graphs,
-                                                                                                                                                  mean_qed_loss / processed_graphs), end='\r')
+            print("Running %s, batch %i (has %i graphs). Total loss: %.4f. Edge loss: %.4f. Node loss: %.4f. KL loss: %.4f. Property loss: %.4f. Node error: %.4f. Node pred: %.4f." %
+                  (epoch_name,
+                   step,
+                   num_graphs,
+                   loss / processed_graphs,
+                   mean_edge_loss / processed_graphs,
+                   mean_node_loss / processed_graphs,
+                   mean_kl_loss / processed_graphs,
+                   mean_qed_loss / processed_graphs,
+                   node_loss_error,
+                   node_pred_error / processed_graphs), end='\r')
 
             # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
             # exit(0)  # TODO: exit

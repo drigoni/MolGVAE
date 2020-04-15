@@ -85,7 +85,7 @@ class MolGVAE(ChemModel):
                         'num_timesteps': 5,                                    # gnn propagation step
                         'hidden_size_decoder': 200,                             # decoder hidden size dimension
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
-                        "kl_trade_off_lambda": 0.3,                             # kl tradeoff originale 0.3
+                        "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
                         'learning_rate': 0.001,
                         'graph_state_dropout_keep_prob': 1,    
                         "compensate_num": 1,                                    # how many atoms to be added during generation
@@ -127,7 +127,6 @@ class MolGVAE(ChemModel):
 
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
         self.placeholders['edge_weight_dropout_keep_prob'] = tf.placeholder(tf.float32, None, name='edge_weight_dropout_keep_prob')
-        self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, None, num_symbols], name='initial_node_representation')  # num_symbols
         # mask out invalid node
         self.placeholders['node_mask'] = tf.placeholder(tf.float32, [None, None], name='node_mask')  # [b x v]
         self.placeholders['num_vertices'] = tf.placeholder(tf.int32, (), name="num_vertices")
@@ -227,6 +226,7 @@ class MolGVAE(ChemModel):
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
         self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
         self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
+        #self.weights['mlp_hist'] = MLP(h_dim_en + 2*hist_dim, h_dim_en, [h_dim_en + 2*hist_dim, h_dim_en], 1)
         self.weights['latent_space_dec0'] = tf.Variable(glorot_init([h_dim_en + 2*hist_dim, h_dim_en]))
         self.weights['latent_space_bias_dec0'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32))
 
@@ -409,18 +409,21 @@ class MolGVAE(ChemModel):
             parallel_iterations=self.params['batch_size']
         )
 
-        atoms = atoms.stack()
+        atoms = atoms.stack() * tf.cast(self.ops['graph_state_mask'], tf.int32)
         init_h_states = init_atoms.stack() * self.ops['graph_state_mask']
-        nodes_type_probs = fx_prob.stack()
+        nodes_type_probs = fx_prob.stack() * self.ops['graph_state_mask']
 
         # save the embedding representations of the atoms
         self.ops['initial_nodes_decoder'] = init_h_states
         self.ops['node_symbol_prob'] = nodes_type_probs
         self.ops['sampled_atoms'] = atoms
-        self.ops['latent_node_symbols'] = tf.one_hot(tf.squeeze(self.ops['sampled_atoms'], axis=-1), self.params['num_symbols'],
-                                                     name='latent_node_symbols')
-        # self.ops['latent_node_symbols'] = tf.Print(self.ops['latent_node_symbols'], [tf.shape(self.ops['latent_node_symbols']), self.ops['latent_node_symbols']], message="latent_node_symbols ", summarize=1000)
 
+        self.ops['latent_node_symbols'] = tf.one_hot(tf.squeeze(self.ops['sampled_atoms'], axis=-1), self.params['num_symbols'],
+                                                     name='latent_node_symbols') * self.ops['graph_state_mask']
+
+        #self.ops['latent_node_symbols'] = tf.Print(self.ops['latent_node_symbols'],
+        #                                           [tf.shape(self.ops['latent_node_symbols']), self.ops['latent_node_symbols']],
+        #                                           message="latent_node_symbols ", summarize=1000)  # TODO: pr
 
     """
     Cycles each atom in order to generate the nodes
@@ -481,6 +484,7 @@ class MolGVAE(ChemModel):
 
         # build a node with NN (K)
         hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
+        #hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
 
@@ -519,6 +523,7 @@ class MolGVAE(ChemModel):
 
         # build a node with NN (K)
         hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
+        # hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
 
@@ -644,7 +649,7 @@ class MolGVAE(ChemModel):
         v = self.placeholders['num_vertices']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
-        batch_size = tf.shape(self.placeholders['initial_node_representation'])[0]
+        batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
         # We still use the embedding of the atoms generated with the new drigoni function
         # If we are doing reconstruction or training we use the atoms sampled in the nodes procdeure
         # Note: If we use the TF in the node procedure, the sampled atoms are equal to the GT
@@ -777,7 +782,9 @@ class MolGVAE(ChemModel):
         self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * 
                                                       self.placeholders['node_symbols'], axis=[1, 2])
 
-        self.ops['error'] = tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
+
+        self.ops['node_loss_error'] = - tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
+        self.ops['node_pred_error'] = tf.reduce_sum(tf.cast(tf.not_equal(self.ops['latent_node_symbols'], self.placeholders['node_symbols']), tf.float32))
 
         # Add in the loss for calculating QED
         for (internal_id, task_id) in enumerate(self.params['task_ids']):
@@ -1029,7 +1036,6 @@ class MolGVAE(ChemModel):
             self.placeholders['z_prior']: random_normal_states, # [1, v, h]
             self.placeholders['incre_adj_mat']: incre_adj_mat,  # [1, 1, e, v, v]
             self.placeholders['num_vertices']: num_vertices,  # v
-            self.placeholders['initial_node_representation']: [elements['init']],
             self.placeholders['node_symbols']: [elements['init']],
             self.ops['latent_node_symbols']: latent_node_symbol,
             self.placeholders['adjacency_matrix']: [elements['adj_mat']],
@@ -1079,7 +1085,6 @@ class MolGVAE(ChemModel):
         return {
                 self.placeholders['incre_adj_mat']: incre_adj_mat,  # [1, 1, e, v, v]
                 self.placeholders['num_vertices']: num_vertices,  # v
-                self.placeholders['initial_node_representation']: [elements['init']],  # only for batch size
                 self.ops['initial_nodes_decoder']: latent_nodes,
                 self.ops['latent_node_symbols']: latent_node_symbol,
                 self.placeholders['adjacency_matrix']: [elements['adj_mat']],
@@ -1104,7 +1109,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['z_prior']: latent_points,  # [hl]
                 self.placeholders['num_vertices']: num_vertices,  # v
                 self.placeholders['node_mask']: [elements['mask']],
-                self.placeholders['initial_node_representation']: [elements['init']],
                 self.placeholders['node_symbols']: [elements['init']],
                 self.placeholders['adjacency_matrix']: [elements['adj_mat']],
                 self.placeholders['graph_state_keep_prob']: 1,
@@ -1469,7 +1473,6 @@ class MolGVAE(ChemModel):
             num_graphs = len(batch_data['init'])
             initial_representations = batch_data['init']
             batch_feed_dict = {
-                self.placeholders['initial_node_representation']: initial_representations,
                 self.placeholders['node_symbols']: batch_data['init'],
                 self.placeholders['target_values']: np.transpose(batch_data['labels'], axes=[1,0]),
                 self.placeholders['target_mask']: np.transpose(batch_data['task_masks'], axes=[1, 0]),
@@ -1497,6 +1500,7 @@ class MolGVAE(ChemModel):
             }
             bucket_counters[bucket] += 1
             # print(batch_data['smiles'])  # TODO: pr
+            # print(batch_data['init'])  # TODO: pr
             yield batch_feed_dict
 
 if __name__ == "__main__":

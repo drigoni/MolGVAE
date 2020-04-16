@@ -63,6 +63,7 @@ class MolGVAE(ChemModel):
                         'prior_learning_rate': 0.05,
                         'stop_criterion': 0.01,
                         'num_epochs': 1000 if dataset == 'zinc' else 1000,
+                        'num_teacher_forcing': 5 if dataset == 'zinc' else 2,
                         'number_of_generation': 20000,
                         'optimization_step': 0,      
                         'maximum_distance': 50,

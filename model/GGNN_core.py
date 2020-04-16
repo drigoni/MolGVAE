@@ -291,13 +291,17 @@ class ChemModel(object):
         node_pred_error = 0
         start_time = time.time()
         processed_graphs = 0
+        if is_training and self.params['num_teacher_forcing'] >= epoch_num:
+            teacher_forcing = True
+        else:
+            teacher_forcing = False
         batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=self.params['batch_size']) #self.params['batch_size'])
 
         for step, batch_data in enumerate(batch_iterator):
             num_graphs = batch_data[self.placeholders['num_graphs']]
             processed_graphs += num_graphs
             batch_data[self.placeholders['is_generative']] = False
-            batch_data[self.placeholders['use_teacher_forcing_nodes']] = is_training
+            batch_data[self.placeholders['use_teacher_forcing_nodes']] = teacher_forcing
             batch_data[self.placeholders['z_prior']] = utils.generate_std_normal(self.params['batch_size'],
                                                                                  batch_data[self.placeholders['num_vertices']],
                                                                                  self.params['hidden_size_encoder'])

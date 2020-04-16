@@ -63,13 +63,16 @@ class MolGVAE(ChemModel):
                         'prior_learning_rate': 0.05,
                         'stop_criterion': 0.01,
                         'num_epochs': 1000 if dataset == 'zinc' else 1000,
-                        'num_teacher_forcing': 5 if dataset == 'zinc' else 2,
+                        'num_teacher_forcing': 1000 if dataset == 'zinc' else 10000,
                         'number_of_generation': 20000,
                         'optimization_step': 0,      
                         'maximum_distance': 50,
                         "use_argmax_nodes": False,                      # use random sampling or argmax during node sampling
                         "use_argmax_bonds": False,                      # use random sampling or argmax during bonds generations
                         'use_mask': False,                              # true to use node mask
+                        'use_graph': True,  # use gnn
+                        'use_gin': False,  # use gin as gnn
+                        'gin_epsilon': 0,  # gin epsilon
                         'residual_connection_on': True,                 # whether residual connection is on
                         'residual_connections': {
                                 2: [0],
@@ -83,7 +86,7 @@ class MolGVAE(ChemModel):
                                 18: [0, 2, 4, 6, 8, 10, 12, 14, 16],
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
-                        'num_timesteps': 5,                                    # gnn propagation step
+                        'num_timesteps': 12,                                    # gnn propagation step
                         'hidden_size_decoder': 200,                             # decoder hidden size dimension
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
@@ -101,9 +104,6 @@ class MolGVAE(ChemModel):
                         'reconstruction_en': 20,            # number of encoding in reconstruction
                         'reconstruction_dn': 1,             # number of decoding in reconstruction
 
-                        'use_graph': False,                  # use gnn
-                        'use_gin': True,                    # use gin as gnn
-                        'gin_epsilon': 0,                   # gin epsilon
                         "label_one_hot": False,             # one hot label or not
                         "multi_bfs_path": False,            # whether sample several BFS paths for each molecule
                         "bfs_path_count": 30,

@@ -42,7 +42,6 @@ class ChemModel(object):
             self.params['try_different_starting'] = False
             self.params['use_argmax_nodes'] = True
             self.params['use_argmax_bonds'] = True
-            self.params['use_mask'] = True
 
         if self.params['generation'] == 3:  # for testing
             self.params['try_different_starting'] = False

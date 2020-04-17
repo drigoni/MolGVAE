@@ -492,9 +492,18 @@ class MolGVAE(ChemModel):
         # node = tf.Print(node, [tf.shape(node), node], message="node_latent_space ", summarize=1000)  # TODO: pr
         fx_logit = tf.squeeze(tf.matmul(node_prob, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases'])
         if self.params['use_mask']:
-            fx_logit = self.mask_mols(fx_logit, hist_diff_pos)
+            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
         fx_prob = tf.nn.softmax(fx_logit)
         # fx_prob = tf.Print(fx_prob, [fx_prob], message="training sampling: probs after masking ", summarize=1000)  # TODO: pr
+
+        # test the mask
+        #test = tf.cond(tf.reduce_any(mask),
+        #                       lambda: mask,
+        #                       lambda: tf.ones_like(mask))
+        #test = tf.cast(test, tf.float32)
+        #val = tf.argmax(self.placeholders['node_symbols'][idx_sample][idx_atom])
+        #self.ops['assert'] = tf.Assert(tf.equal(test[val], 1), [test, val])
+
 
         # update the histogram
         probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
@@ -530,7 +539,7 @@ class MolGVAE(ChemModel):
 
         fx_logit = tf.squeeze(tf.matmul(node_prob, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases'])
         if self.params['use_mask']:
-            fx_logit = self.mask_mols(fx_logit, hist_diff_pos)
+            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
         fx_prob = tf.nn.softmax(fx_logit)
         s_atom = self.sample_atom(fx_prob, False)
         new_updated_hist = self.update_hist(updated_hist, s_atom)
@@ -566,7 +575,7 @@ class MolGVAE(ChemModel):
         logits_masked = tf.cond(tf.reduce_any(mask_bool),
                                lambda: logits + (mask * LARGE_NUMBER - LARGE_NUMBER),
                                lambda: logits)
-        return logits_masked
+        return logits_masked, mask_bool
 
 
     """

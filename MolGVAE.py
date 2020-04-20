@@ -1268,6 +1268,7 @@ class MolGVAE(ChemModel):
             # Try different starting points
             if self.params["try_different_starting"]:
                 starting_point=list(range(self.params["num_different_starting"]))
+                starting_point = [i for i in starting_point if i < real_length]
             else:
                 starting_point=[0]
         else:

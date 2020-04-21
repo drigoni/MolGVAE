@@ -46,6 +46,7 @@ def read_zinc():
 
 
 def train_valid_split(dataset):
+    dataset=np.random.shuffle(dataset)
     n_mol_out = 0
     n_test = 5000
     test_idx = np.arange(0, n_test)

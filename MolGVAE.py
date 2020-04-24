@@ -101,7 +101,7 @@ class MolGVAE(ChemModel):
                         'reconstruction_en': 20,            # number of encoding in reconstruction
                         'reconstruction_dn': 1,             # number of decoding in reconstruction
 
-                        'use_graph': False,                  # use gnn
+                        'use_graph': False,                 # use gnn
                         'use_gin': True,                    # use gin as gnn
                         'gin_epsilon': 0,                   # gin epsilon
                         "label_one_hot": False,             # one hot label or not
@@ -114,6 +114,7 @@ class MolGVAE(ChemModel):
                         "truncate_distance": 10,
                         "use_gpu": True,
                         "use_rec_multi_threads": True,
+                        "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
                         })
 
         return params
@@ -789,8 +790,19 @@ class MolGVAE(ChemModel):
         kl_loss = tf.reshape(kl_loss, [-1, v, h_dim_en]) * self.ops['graph_state_mask']
         self.ops['kl_loss'] = -0.5 * tf.reduce_sum(kl_loss, [1,2])
         # Node symbol loss
-        self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * 
+        self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) *
                                                       self.placeholders['node_symbols'], axis=[1, 2])
+
+        if self.params['use_set_losses']:
+            # first version
+            # iou_values = self.IoU(self.ops['latent_node_symbols'], self.placeholders['node_symbols'])
+            # selection = tf.one_hot(tf.argmax(self.ops['node_symbol_prob'], 2), self.params['num_symbols'],
+            #           name='latent_node_symbols') * self.ops['graph_state_mask']
+            #iou_values = self.IoU(tf.cast(selection, tf.float32), self.placeholders['node_symbols'])
+            # self.ops['node_symbol_loss'] = self.ops['node_symbol_loss'] * (1 - iou_values)
+            # second version
+            self.ops['node_symbol_loss'] = 1 - self.IoU(self.ops['node_symbol_prob'], self.placeholders['node_symbols'])
+
 
 
         self.ops['node_loss_error'] = - tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
@@ -835,6 +847,14 @@ class MolGVAE(ChemModel):
         return tf.reduce_mean(self.ops["edge_loss"] + self.ops['node_symbol_loss'] + \
                               kl_trade_off_lambda *self.ops['kl_loss'])\
                               + self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
+
+    def IoU(self, y_pred, y_true):
+        # van Beers, Floris, et al. "Deep Neural Networks with Intersection over Union Loss for Binary Image Segmentation.
+        # " Proceedings of the 8th International Conference on Pattern Recognition Applications and Methods. 2019.
+        I = tf.reduce_sum(y_pred * y_true, axis=(1, 2))
+        S = tf.reduce_sum(y_pred + y_true, axis=(1, 2))
+        U = S - I
+        return I / U
 
     def gated_regression(self, last_h, regression_gate, regression_transform, hidden_size, projection_weight, projection_bias, v, mask):
         # last_h: [b x v x h]
@@ -1316,9 +1336,10 @@ class MolGVAE(ChemModel):
 
         if n_gen_cur >= n_gen_max:
             suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
+            mask = "_masked" if self.params['use_mask'] else "_noMask"
             log_dir = self.params['log_dir']
             priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
-                          + suff + ".txt"
+                          + mask + suff + ".txt"
             generated = np.reshape(generated_all_similes, (1000, -1))
             f = open(priors_file, "w")
             for line in generated:
@@ -1451,10 +1472,10 @@ class MolGVAE(ChemModel):
             bucket_counters[bucket] += 1
 
         suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
+        mask = "_masked" if self.params['use_mask'] else "_noMask"
+        parent = "(" + str(self.params["reconstruction_en"]) + ":" + str(self.params["reconstruction_dn"]) + ")"
         log_dir = self.params['log_dir']
-        recon_file = log_dir + "/" + str(dataset) + "_decoded_reconstruction(" + \
-                      str(self.params["reconstruction_en"]) + ":" + str(self.params["reconstruction_dn"]) + ")_" + \
-                     str(self.params["kl_trade_off_lambda"]) + suff + ".txt"
+        recon_file = log_dir + "/" + str(dataset) + "_decoded_reconstruction_" + parent + "_" + str(self.params["kl_trade_off_lambda"]) + mask + suff + ".txt"
         f = open(recon_file, "w")
         for line in generated_all_similes:
             for res in line:

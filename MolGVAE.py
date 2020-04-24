@@ -1324,6 +1324,7 @@ class MolGVAE(ChemModel):
 
         n_gen_max = self.params['number_of_generation']
         n_gen_cur = len(generated_all_similes)
+        print("Molecules generated: ", n_gen_cur, end='\r')
         # give and indication about the number of generated molecules
         if (n_gen_cur % (n_gen_max / 100.0)) == 0:
             suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
@@ -1348,7 +1349,7 @@ class MolGVAE(ChemModel):
                     f.write(";,;")
                 f.write("\n")
             f.close()
-            print("generation done")
+            print("Generation done")
             exit(0)
 
     def compensate_node_length(self, elements, bucket_size):
@@ -1467,7 +1468,7 @@ class MolGVAE(ChemModel):
                     # initial state
                     self.reconstruction_new_graphs(maximum_length, generated_all_similes, elements)
 
-            print(len(generated_all_similes))
+            print("Molecules reconstructed: ", len(generated_all_similes), end='\r')
             # exit(0)
             bucket_counters[bucket] += 1
 
@@ -1483,7 +1484,7 @@ class MolGVAE(ChemModel):
                 f.write(";,;")
             f.write("\n")
         f.close()
-        print("reconstruction done")
+        print('Reconstruction done')
         exit(0)
 
     def make_minibatch_iterator(self, data, is_training: bool):

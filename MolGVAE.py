@@ -1328,9 +1328,10 @@ class MolGVAE(ChemModel):
         # give and indication about the number of generated molecules
         if (n_gen_cur % (n_gen_max / 100.0)) == 0:
             suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
+            mask = "_masked" if self.params['use_mask'] else "_noMask"
             log_dir = self.params['log_dir']
             priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
-                          + suff + ".txt"
+                          + mask + suff + ".txt"
             f = open(priors_file, "a")
             f.writelines("Number of generated molecules: " + str(n_gen_cur) + "\n")
             f.close()

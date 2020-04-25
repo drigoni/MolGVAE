@@ -485,7 +485,7 @@ class MolGVAE(ChemModel):
         exp = tf.expand_dims(conc, 0)   # [1, z + Hdiff + Hcurrent]
 
         # build a node with NN (K)
-        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
+        hist_emb = tf.nn.leaky_relu(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
         #hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
@@ -533,7 +533,7 @@ class MolGVAE(ChemModel):
         exp = tf.expand_dims(conc, 0)
 
         # build a node with NN (K)
-        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
+        hist_emb = tf.nn.leaky_relu(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
         # hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
@@ -1327,10 +1327,11 @@ class MolGVAE(ChemModel):
         print("Molecules generated: ", n_gen_cur, end='\r')
         # give and indication about the number of generated molecules
         if (n_gen_cur % (n_gen_max / 100.0)) == 0:
+            mask = "_masked" if self.params['use_mask'] else "_noMask"
             suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
             log_dir = self.params['log_dir']
             priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
-                          + suff + ".txt"
+                          + mask + suff + ".txt"
             f = open(priors_file, "a")
             f.writelines("Number of generated molecules: " + str(n_gen_cur) + "\n")
             f.close()

@@ -689,23 +689,24 @@ class MolGVAE(ChemModel):
         # concat the hidden states with the node in focus
         filtered_z_sampled = tf.concat([filtered_z_sampled, node_sequence], axis=2) # [b, v, h + h + 1]
         # Decoder GNN
-        if self.params["use_graph"]:
-            if self.params["residual_connection_on"]:
-                new_filtered_z_sampled = self.compute_final_node_representations_with_residual(filtered_z_sampled,
-                                                    tf.transpose(incre_adj_mat, [1, 0, 2, 3]),
-                                                    "_decoder") # [b, v, h + h]
-            else:
-                new_filtered_z_sampled = self.compute_final_node_representations_without_residual(filtered_z_sampled,
-                                                tf.transpose(incre_adj_mat, [1, 0, 2, 3]),
-                                                self.weights['edge_weights_decoder'],
-                                                self.weights['edge_biases_decoder'],
-                                                self.weights['node_gru_decoder'], "gru_scope_decoder") # [b, v, h + h]
-        elif self.params['use_gin']:
-            new_filtered_z_sampled = self.compute_final_node_with_GIN(filtered_z_sampled,
-                                                                      tf.transpose(incre_adj_mat,[1, 0, 2, 3]),
-                                                                      "_decoder")  # [b, v, h + h]
-        else:
-            new_filtered_z_sampled = filtered_z_sampled
+        # if self.params["use_graph"]:
+        #     if self.params["residual_connection_on"]:
+        #         new_filtered_z_sampled = self.compute_final_node_representations_with_residual(filtered_z_sampled,
+        #                                             tf.transpose(incre_adj_mat, [1, 0, 2, 3]),
+        #                                             "_decoder") # [b, v, h + h]
+        #     else:
+        #         new_filtered_z_sampled = self.compute_final_node_representations_without_residual(filtered_z_sampled,
+        #                                         tf.transpose(incre_adj_mat, [1, 0, 2, 3]),
+        #                                         self.weights['edge_weights_decoder'],
+        #                                         self.weights['edge_biases_decoder'],
+        #                                         self.weights['node_gru_decoder'], "gru_scope_decoder") # [b, v, h + h]
+        # elif self.params['use_gin']:
+        #     new_filtered_z_sampled = self.compute_final_node_with_GIN(filtered_z_sampled,
+        #                                                               tf.transpose(incre_adj_mat,[1, 0, 2, 3]),
+        #                                                               "_decoder")  # [b, v, h + h]
+        # else:
+        #
+        new_filtered_z_sampled = filtered_z_sampled
         # Filter nonexist nodes
         new_filtered_z_sampled=new_filtered_z_sampled * self.ops['graph_state_mask']
         # Take out the node in focus

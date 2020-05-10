@@ -636,11 +636,15 @@ class MolGVAE(ChemModel):
         cross_entropy_losses = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
         edge_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
         edge_type_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        idx_final, cross_entropy_losses_final, edge_predictions_final, edge_type_predictions_final = \
+        edge_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        edge_type_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        idx_final, cross_entropy_losses_final, edge_predictions_final, edge_type_predictions_final, \
+        edge_pred_error, edge_type_pred_error= \
             tf.while_loop(
-                lambda idx, cross_entropy_losses, edge_predictions, edge_type_predictions: idx < self.placeholders[
+                lambda idx, cross_entropy_losses, edge_predictions, edge_type_predictions,
+                       edge_pred_error, edge_type_pred_error: idx < self.placeholders[
                     'max_iteration_num'], self.generate_cross_entropy,
-                (tf.constant(0), cross_entropy_losses, edge_predictions, edge_type_predictions)
+                (tf.constant(0), cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error)
             )
 
         # record the predictions for generation
@@ -650,13 +654,15 @@ class MolGVAE(ChemModel):
         # final cross entropy losses
         cross_entropy_losses_final = cross_entropy_losses_final.stack()
         self.ops['cross_entropy_losses'] = tf.transpose(cross_entropy_losses_final, [1, 0])  # [b, es]
+        self.ops['edge_pred_error'] = tf.reduce_sum(tf.transpose(edge_pred_error.stack(), [1, 0]), axis=-1)
+        self.ops['edge_type_pred_error'] = tf.reduce_sum(tf.transpose(edge_type_pred_error.stack(), [1, 0]), axis=-1)
 
     def fully_connected(self, input, hidden_weight, hidden_bias, output_weight):
         output=tf.nn.relu(tf.matmul(input, hidden_weight) + hidden_bias)       
         output=tf.matmul(output, output_weight) 
         return output
 
-    def generate_cross_entropy(self, idx, cross_entropy_losses, edge_predictions, edge_type_predictions):
+    def generate_cross_entropy(self, idx, cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error):
         v = self.placeholders['num_vertices']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
@@ -776,8 +782,18 @@ class MolGVAE(ChemModel):
         cross_entropy_losses = cross_entropy_losses.write(idx, iteration_loss)
         edge_predictions = edge_predictions.write(idx, tf.nn.softmax(edge_logits))
         edge_type_predictions = edge_type_predictions.write(idx, edge_type_probs)
+        # correct predictions
+        corr_edge = tf.cast(tf.not_equal(tf.argmax(tf.nn.softmax(edge_logits), axis=-1),
+                                                       tf.argmax(edge_labels, axis=-1)),
+                                          tf.float32)
+        corr_type_edge = tf.reduce_sum(tf.cast(tf.not_equal(tf.argmax(edge_type_probs, axis=-1),
+                                                            tf.argmax(edge_type_labels, axis=-1)),
+                                               tf.float32),
+                                       axis=-1)
+        edge_pred_error = edge_pred_error.write(idx, corr_edge)
+        edge_type_pred_error = edge_type_pred_error.write(idx, corr_type_edge)
 
-        return (idx+1, cross_entropy_losses, edge_predictions, edge_type_predictions)
+        return (idx+1, cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error)
 
     def construct_loss(self):
         v = self.placeholders['num_vertices']
@@ -805,8 +821,17 @@ class MolGVAE(ChemModel):
 
 
 
-        self.ops['node_loss_error'] = - tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
-        self.ops['node_pred_error'] = tf.reduce_sum(tf.cast(tf.not_equal(self.ops['latent_node_symbols'], self.placeholders['node_symbols']), tf.float32))
+        latent_node_symbol = tf.cast(tf.not_equal(tf.argmax(self.ops['latent_node_symbols'], axis=-1),
+                                          tf.argmax(self.placeholders['node_symbols'], axis=-1)),
+                                     tf.float32)
+
+        number_correct_mols = self.ops['edge_pred_error'] + self.ops['edge_type_pred_error'] + tf.reduce_sum(latent_node_symbol, axis= -1)
+        # self.ops['reconstruction'] = tf.reduce_mean(tf.cast(tf.equal(number_correct_mols, tf.zeros_like(number_correct_mols)), tf.float32))
+        self.ops['reconstruction'] = tf.reduce_sum(number_correct_mols)
+        # after because it rewrite the operations
+        self.ops['node_pred_error'] = tf.reduce_mean(latent_node_symbol)
+        self.ops['edge_pred_error'] = tf.reduce_mean(self.ops['edge_pred_error'])
+        self.ops['edge_type_pred_error'] = tf.reduce_mean(self.ops['edge_type_pred_error'])
 
         # Add in the loss for calculating QED
         for (internal_id, task_id) in enumerate(self.params['task_ids']):

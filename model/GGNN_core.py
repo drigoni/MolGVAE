@@ -286,8 +286,10 @@ class ChemModel(object):
         mean_node_loss = 0
         mean_kl_loss = 0
         mean_qed_loss = 0
-        node_loss_error = -10000000
         node_pred_error = 0
+        edge_pred_error = 0
+        edge_type_pred_error = 0
+        reconstruction = 0
         start_time = time.time()
         processed_graphs = 0
         if is_training and self.params['num_teacher_forcing'] >= epoch_num:
@@ -314,12 +316,14 @@ class ChemModel(object):
                               self.ops['mean'], self.ops['logvariance'],
                               self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'], 
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'],
-                              self.ops['node_loss_error'], self.ops['node_pred_error']]
+                              self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
+                              self.ops['reconstruction']]
             else:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['sampled_atoms'],
-                              self.ops['node_loss_error'], self.ops['node_pred_error']]
+                              self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
+                              self.ops['reconstruction']]
             result = self.sess.run(fetch_list, feed_dict=batch_data)
             batch_loss = result[0]
             loss += batch_loss * num_graphs
@@ -328,27 +332,39 @@ class ChemModel(object):
                 mean_node_loss += result[13] * num_graphs
                 mean_kl_loss += result[14] * num_graphs
                 mean_qed_loss += result[15] * num_graphs
-                node_loss_error = max(node_loss_error, np.max(result[17]))
-                node_pred_error += result[18]
+                node_pred_error += result[17] * num_graphs
+                edge_pred_error += result[18] * num_graphs
+                edge_type_pred_error += result[19] * num_graphs
+                reconstruction += result[20]
             else:
                 mean_edge_loss += result[1] * num_graphs
                 mean_node_loss += result[2] * num_graphs
                 mean_kl_loss += result[3] * num_graphs
                 mean_qed_loss += result[4] * num_graphs
-                node_loss_error = max(node_loss_error, np.max(result[6]))
-                node_pred_error += result[7]
+                node_pred_error += result[6] * num_graphs
+                edge_pred_error += result[7] * num_graphs
+                edge_type_pred_error += result[8] * num_graphs
+                reconstruction += result[9]
 
-            print("Running %s, batch %i (has %i graphs). Total loss: %.4f. Edge loss: %.4f. Node loss: %.4f. KL loss: %.4f. Property loss: %.4f. Node error: %.4f. Node pred: %.4f." %
-                  (epoch_name,
-                   step,
-                   num_graphs,
+            print("Running %s, batch %i (has %i graphs). "
+                  "Total loss: %.4f | "
+                  "Edge loss: %.4f | "
+                  "Node loss: %.4f | "
+                  "KL loss: %.4f | "
+                  "Prop loss: %.4f | "
+                  "Node pred: %.2f | "
+                  "Edge pred: (%.2f, %.2f) | "
+                  "Reconstruction: %.2f "%
+                  (epoch_name, step, num_graphs,
                    loss / processed_graphs,
                    mean_edge_loss / processed_graphs,
                    mean_node_loss / processed_graphs,
                    mean_kl_loss / processed_graphs,
                    mean_qed_loss / processed_graphs,
-                   node_loss_error,
-                   node_pred_error / processed_graphs), end='\r')
+                   node_pred_error / processed_graphs,
+                   edge_pred_error / processed_graphs,
+                   edge_type_pred_error / processed_graphs,
+                   reconstruction), end='\r')
 
             # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
             # exit(0)  # TODO: exit
@@ -360,8 +376,13 @@ class ChemModel(object):
         mean_kl_loss /= processed_graphs
         mean_qed_loss /= processed_graphs
         loss = loss / processed_graphs
+        node_pred_error /= processed_graphs
+        edge_pred_error /= processed_graphs
+        edge_type_pred_error /= processed_graphs
+        reconstruction /= processed_graphs
         instance_per_sec = processed_graphs / (time.time() - start_time)
-        return loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec
+        return loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec, \
+               node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction
 
     def generate_new_graphs(self, data):
         raise Exception("Models have to implement generate_new_graphs!")
@@ -386,17 +407,25 @@ class ChemModel(object):
                 if self.params['generation'] == 0:
                     print("========== EPOCH %i =================" % epoch)
      
-                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec,\
+                        node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction = \
                         self.run_epoch("epoch %i (training)" % epoch, epoch, self.train_data, True)
 
-                    print("\r\x1b[K Train loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Train loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | Prop loss: %.5f "
+                          "| Node pred: %.4f. | Edge pred: %.4f. | Edge type pred: %.4f. | Reconstruction: %.4f."
+                          "| instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss,
+                           node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction, instance_per_sec))
                     
-                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec,\
+                        node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction = \
                         self.run_epoch("epoch %i (validation)" % epoch, epoch, self.valid_data, False)
 
-                    print("\r\x1b[K Valid loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Valid loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | Prop loss: %.5f "
+                          "| Node pred: %.4f. | Edge pred: %.4f. | Edge type pred: %.4f. | Reconstruction: %.4f."
+                          "| instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss,
+                           node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction, instance_per_sec))
 
                     epoch_time = time.time() - total_time_start
                     log_entry = {
@@ -416,23 +445,35 @@ class ChemModel(object):
                 elif self.params['generation'] == 2:
                     self.reconstruction(self.test_data)
                 elif self.params['generation'] == 3:  # validation only
-                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec,\
+                        node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction = \
                         self.run_epoch("epoch %i (training)" % epoch, epoch, self.train_data, False)
 
-                    print("\r\x1b[K Train loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Train loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | Prop loss: %.5f "
+                          "| Node pred: %.4f. | Edge pred: %.4f. | Edge type pred: %.4f. | Reconstruction: %.4f."
+                          "| instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss,
+                           node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction, instance_per_sec))
 
-                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec,\
+                        node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction = \
                         self.run_epoch("epoch %i (valid)" % epoch, epoch, self.valid_data, False)
 
-                    print("\r\x1b[K Valid loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Valid loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | Prop loss: %.5f "
+                          "| Node pred: %.4f. | Edge pred: %.4f. | Edge type pred: %.4f. | Reconstruction: %.4f."
+                          "| instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss,
+                           node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction, instance_per_sec))
 
-                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec = \
+                    loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec,\
+                        node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction = \
                         self.run_epoch("epoch %i (test)" % epoch, epoch, self.test_data, False)
 
-                    print("\r\x1b[K Test loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | QED loss: %.5f | instances/sec: %.2f" %
-                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec))
+                    print("\r\x1b[K Test loss: %.5f | Edge loss: %.5f | Node loss: %.5f | KL loss: %.5f | Prop loss: %.5f "
+                          "| Node pred: %.4f. | Edge pred: %.4f. | Edge type pred: %.4f. | Reconstruction: %.4f."
+                          "| instances/sec: %.2f" %
+                          (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss,
+                           node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction, instance_per_sec))
                     exit(0)
 
 

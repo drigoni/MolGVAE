@@ -121,7 +121,6 @@ class MolGVAE(ChemModel):
 
     def prepare_specific_graph_model(self) -> None:
         # params
-        num_symbols = self.params['num_symbols']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         expanded_h_dim = h_dim_de + h_dim_en + 1  # 1 for focus bit
@@ -217,7 +216,6 @@ class MolGVAE(ChemModel):
                                                                       self.placeholders['out_layer_dropout_keep_prob'])
 
 
-
         # Weights final part encoder. They map all nodes in one point in the latent space
         self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en, h_dim_en]), name="mean_weights")
         self.weights['mean_biases'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32), name="mean_biases")
@@ -235,7 +233,12 @@ class MolGVAE(ChemModel):
         # The weights for generating nodel symbol logits    
         self.weights['node_symbol_weights'] = tf.Variable(glorot_init([h_dim_de , self.params['num_symbols']]))
         self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
-        
+
+
+        # gen edges
+        self.weights['edge_gen'] = tf.Variable(glorot_init([1, self.num_edge_types + 1]))
+        self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types + 1]).astype(np.float32))
+
         feature_dimension = 6 * expanded_h_dim
         # record the total number of features
         self.params["feature_dimension"] = 6
@@ -631,31 +634,74 @@ class MolGVAE(ChemModel):
         new_hist = tf.add(old_hist, array)
         return new_hist
 
-    def construct_logit_matrices(self):
-        # The tensor array used to collect the cross entropy losses at each step
-        cross_entropy_losses = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        edge_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        edge_type_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        edge_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        edge_type_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        idx_final, cross_entropy_losses_final, edge_predictions_final, edge_type_predictions_final, \
-        edge_pred_error, edge_type_pred_error= \
-            tf.while_loop(
-                lambda idx, cross_entropy_losses, edge_predictions, edge_type_predictions,
-                       edge_pred_error, edge_type_pred_error: idx < self.placeholders[
-                    'max_iteration_num'], self.generate_cross_entropy,
-                (tf.constant(0), cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error)
-            )
-
+    # def construct_logit_matrices(self):
+    #     The tensor array used to collect the cross entropy losses at each step
+        # cross_entropy_losses = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        # edge_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        # edge_type_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        # edge_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        # edge_type_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
+        # idx_final, cross_entropy_losses_final, edge_predictions_final, edge_type_predictions_final, \
+        # edge_pred_error, edge_type_pred_error= \
+        #     tf.while_loop(
+        #         lambda idx, cross_entropy_losses, edge_predictions, edge_type_predictions,
+        #                edge_pred_error, edge_type_pred_error: idx < self.placeholders[
+        #             'max_iteration_num'], self.generate_cross_entropy,
+        #         (tf.constant(0), cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error)
+        #     )
+        #
         # record the predictions for generation
-        self.ops['edge_predictions'] = edge_predictions_final.read(0)
-        self.ops['edge_type_predictions'] = edge_type_predictions_final.read(0)
+        # self.ops['edge_predictions'] = edge_predictions_final.read(0)
+        # self.ops['edge_type_predictions'] = edge_type_predictions_final.read(0)
+        #
+        # final cross entropy losses
+        # cross_entropy_losses_final = cross_entropy_losses_final.stack()
+        # self.ops['cross_entropy_losses'] = tf.transpose(cross_entropy_losses_final, [1, 0])  # [b, es]
+        # self.ops['edge_pred_error'] = tf.reduce_sum(tf.transpose(edge_pred_error.stack(), [1, 0]), axis=-1)
+        # self.ops['edge_type_pred_error'] = tf.reduce_sum(tf.transpose(edge_type_pred_error.stack(), [1, 0]), axis=-1)
+
+    def construct_logit_matrices(self):
+        v = self.placeholders['num_vertices']
+        h_dim_en = self.params['hidden_size_encoder']
+        h_dim_de = self.params['hidden_size_decoder']
+        batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
+
+        latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
+        self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
+                                                                                latent_node_state], axis=2)   # [b, v, h + h]
+
+        edge_logits = tf.matmul(self.ops["initial_repre_for_decoder"], tf.transpose(self.ops["initial_repre_for_decoder"], perm=[0, 2, 1]))  # [b, v, v]
+        edge_logits = tf.reshape(edge_logits, [-1, 1])  # [b * v* v, 1]
+
+        # num_edges + 1 -> num edges + no edge
+        final_molecule = tf.nn.softmax(
+            tf.matmul(edge_logits, self.weights['edge_gen']) + self.weights['edge_gen_bias'])  # [b, v*v, num_edges + 1]
+        final_molecule = tf.reshape(final_molecule, [batch_size, v, v, -1])
+
+        self.ops['edge_type_predictions'] = tf.transpose(final_molecule[:, :, :, 1:], [0, 3, 2, 1])
+        self.ops['edge_predictions'] = 1 - tf.squeeze(final_molecule[:, :, :, 0])  # prob inverted
+
+        loss_edge = - tf.reduce_sum(tf.log(self.ops['edge_predictions'] + SMALL_NUMBER)
+                                    * tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1),
+                                    axis=[1,2])
+
+        loss_edge_type = - tf.reduce_sum(tf.log(self.ops['edge_type_predictions'] + SMALL_NUMBER) *
+                                         self.placeholders['adjacency_matrix'],
+                                         axis=[1,2,3])
 
         # final cross entropy losses
-        cross_entropy_losses_final = cross_entropy_losses_final.stack()
-        self.ops['cross_entropy_losses'] = tf.transpose(cross_entropy_losses_final, [1, 0])  # [b, es]
-        self.ops['edge_pred_error'] = tf.reduce_sum(tf.transpose(edge_pred_error.stack(), [1, 0]), axis=-1)
-        self.ops['edge_type_pred_error'] = tf.reduce_sum(tf.transpose(edge_type_pred_error.stack(), [1, 0]), axis=-1)
+        self.ops['cross_entropy_losses'] = loss_edge + loss_edge_type
+
+        corr_edge = tf.cast(tf.not_equal(tf.argmax(tf.nn.softmax(self.ops['edge_predictions']), axis=-1),
+                                         tf.argmax(tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1),
+                                                                 axis=-1)),
+                            tf.float32)
+        corr_type_edge = tf.cast(tf.not_equal(tf.argmax(self.ops['edge_type_predictions'], axis=-1),
+                                              tf.argmax(self.placeholders['adjacency_matrix'], axis=-1)),
+                                 tf.float32)
+
+        self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=-1)
+        self.ops['edge_type_pred_error'] = tf.reduce_sum(corr_type_edge, axis=[1, 2])
 
     def fully_connected(self, input, hidden_weight, hidden_bias, output_weight):
         output=tf.nn.relu(tf.matmul(input, hidden_weight) + hidden_bias)       
@@ -800,7 +846,8 @@ class MolGVAE(ChemModel):
         h_dim_en = self.params['hidden_size_encoder']
         kl_trade_off_lambda =self.placeholders['kl_trade_off_lambda']
         # Edge loss
-        self.ops["edge_loss"] = tf.reduce_sum(self.ops['cross_entropy_losses'] * self.placeholders['iteration_mask'], axis=1)
+        # self.ops["edge_loss"] = tf.reduce_sum(self.ops['cross_entropy_losses'] * self.placeholders['iteration_mask'], axis=1)
+        self.ops["edge_loss"] = self.ops['cross_entropy_losses']
         # KL loss
         kl_loss = 1 + self.ops['logvariance'] - tf.square(self.ops['mean']) - tf.exp(self.ops['logvariance'])
         kl_loss = tf.reshape(kl_loss, [-1, v, h_dim_en]) * self.ops['graph_state_mask']

@@ -25,8 +25,7 @@ geometry_numbers = [3, 4, 5, 6]  # triangle, square, pentagon, hexagon
 # bond mapping
 bond_dict = {'SINGLE': 0, 'DOUBLE': 1, 'TRIPLE': 2, "AROMATIC": 3}
 number_to_bond = {0: Chem.rdchem.BondType.SINGLE, 1: Chem.rdchem.BondType.DOUBLE,
-                  2: Chem.rdchem.BondType.TRIPLE, 3: Chem.rdchem.BondType.AROMATIC}
-
+                 2: Chem.rdchem.BondType.TRIPLE, 3: Chem.rdchem.BondType.AROMATIC}
 
 def dataset_info(dataset):
     if dataset == 'qm9':

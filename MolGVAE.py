@@ -873,8 +873,7 @@ class MolGVAE(ChemModel):
                                      tf.float32)
 
         number_correct_mols = self.ops['edge_pred_error'] + self.ops['edge_type_pred_error'] + tf.reduce_sum(latent_node_symbol, axis= -1)
-        # self.ops['reconstruction'] = tf.reduce_mean(tf.cast(tf.equal(number_correct_mols, tf.zeros_like(number_correct_mols)), tf.float32))
-        self.ops['reconstruction'] = tf.reduce_sum(number_correct_mols)
+        self.ops['reconstruction'] = tf.reduce_sum(tf.cast(tf.equal(number_correct_mols, tf.zeros_like(number_correct_mols)), tf.float32))
         # after because it rewrite the operations
         self.ops['node_pred_error'] = tf.reduce_mean(latent_node_symbol)
         self.ops['edge_pred_error'] = tf.reduce_mean(self.ops['edge_pred_error'])

@@ -129,7 +129,7 @@ class MolGVAE(ChemModel):
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
         self.placeholders['edge_weight_dropout_keep_prob'] = tf.placeholder(tf.float32, None, name='edge_weight_dropout_keep_prob')
         # mask out invalid node
-        self.placeholders['node_mask'] = tf.placeholder(tf.float32, [None, None], name='node_mask')  # [b x v]
+        self.placeholders['node_mask'] = tf.placeholder(tf.float32, [None, None], name='node_mask')  # [b v]
         self.placeholders['num_vertices'] = tf.placeholder(tf.int32, (), name="num_vertices")
         # adj for encoder
         self.placeholders['adjacency_matrix'] = tf.placeholder(tf.float32, [None, self.num_edge_types, None, None], name="adjacency_matrix")  # [b, e, v, v]
@@ -236,7 +236,8 @@ class MolGVAE(ChemModel):
 
 
         # gen edges
-        self.weights['edge_gen'] = tf.Variable(glorot_init([1, self.num_edge_types + 1]))
+        # self.weights['mlp_edges'] = MLP(h_dim_en+h_dim_de, 20, [h_dim_de, h_dim_de], self.placeholders['out_layer_dropout_keep_prob'])
+        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_en+h_dim_de, self.num_edge_types + 1]))
         self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types + 1]).astype(np.float32))
 
         feature_dimension = 6 * expanded_h_dim
@@ -634,212 +635,116 @@ class MolGVAE(ChemModel):
         new_hist = tf.add(old_hist, array)
         return new_hist
 
-    # def construct_logit_matrices(self):
-    #     The tensor array used to collect the cross entropy losses at each step
-        # cross_entropy_losses = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        # edge_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        # edge_type_predictions = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        # edge_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        # edge_type_pred_error = tf.TensorArray(dtype=tf.float32, size=self.placeholders['max_iteration_num'])
-        # idx_final, cross_entropy_losses_final, edge_predictions_final, edge_type_predictions_final, \
-        # edge_pred_error, edge_type_pred_error= \
-        #     tf.while_loop(
-        #         lambda idx, cross_entropy_losses, edge_predictions, edge_type_predictions,
-        #                edge_pred_error, edge_type_pred_error: idx < self.placeholders[
-        #             'max_iteration_num'], self.generate_cross_entropy,
-        #         (tf.constant(0), cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error)
-        #     )
-        #
-        # record the predictions for generation
-        # self.ops['edge_predictions'] = edge_predictions_final.read(0)
-        # self.ops['edge_type_predictions'] = edge_type_predictions_final.read(0)
-        #
-        # final cross entropy losses
-        # cross_entropy_losses_final = cross_entropy_losses_final.stack()
-        # self.ops['cross_entropy_losses'] = tf.transpose(cross_entropy_losses_final, [1, 0])  # [b, es]
-        # self.ops['edge_pred_error'] = tf.reduce_sum(tf.transpose(edge_pred_error.stack(), [1, 0]), axis=-1)
-        # self.ops['edge_type_pred_error'] = tf.reduce_sum(tf.transpose(edge_type_pred_error.stack(), [1, 0]), axis=-1)
-
     def construct_logit_matrices(self):
+        v = self.placeholders['num_vertices']
+        batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
+        # prep valences
+        mol_valence_list = []
+        for key in dataset_info(self.params['dataset'])['maximum_valence'].keys():
+            mol_valence_list.append(dataset_info(self.params['dataset'])['maximum_valence'][key])
+        mol_valence = tf.constant(mol_valence_list)
+        indexes = tf.argmax(self.ops['latent_node_symbols'], axis=-1)  # [b, v]
+        valences = tf.nn.embedding_lookup(mol_valence, indexes)
+
+        #    The tensor array used to collect the cross entropy losses at each step
+        edges_pred = tf.TensorArray(dtype=tf.float32, size=v)
+        idx_final, edges_pred, _= \
+            tf.while_loop(
+                lambda idx, edges_pred, valences: idx < v, self.generate_edges,
+                (tf.constant(0), edges_pred, valences)
+            )
+
+        edges_pred = tf.transpose(edges_pred.stack(), [1,3,0,2])
+        self.ops['edges_pred'] = edges_pred * tf.expand_dims(self.ops['graph_state_mask'], 1)
+
+        gt = tf.expand_dims(1 - tf.reduce_sum(self.placeholders['adjacency_matrix'],
+                                              axis=1),
+                            axis=1)
+        gt = tf.concat([gt, self.placeholders['adjacency_matrix']],
+                       axis=1)
+
+        # gt = tf.Print(gt, [gt[0,:,0,0]], message="adj", summarize=1000)  # TODO: pr
+        # gt = tf.Print(gt, [self.ops['edges_pred'][0,:,0,0]], message="pred", summarize=1000)  # TODO: pr
+        # gt = tf.Print(gt, [valences[0,:]], message="valences", summarize=1000)  # TODO: pr
+        # gt = tf.Print(gt, [indexes[0,:]], message = "mol", summarize = 1000)  # TODO: pr
+        # gt = tf.Print(gt, [tf.reduce_sum(gt, 1)[0,0]], message="adj", summarize=1000)  # TODO: pr
+        # gt = tf.Print(gt, [tf.reduce_sum(self.ops['edges_pred'], 1)[0,0]], message="pred", summarize=1000)  # TODO: pr
+
+        # final cross entropy losses
+        loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt, axis=[2, 3])
+        loss = loss_batchEdge[:, 0]
+        # weights the loss for each class of edge
+        n_no_edges = tf.reduce_sum(gt[:, 0, :, :], axis=[1, 2])
+        for i in range(1, self.num_edge_types + 1):
+            sum_tmp = tf.reduce_sum(gt[:, i, :, :], axis=[1, 2])
+            sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_no_edges)
+            weights_temp = n_no_edges / sum_tmp
+            loss += loss_batchEdge[:, i] * weights_temp
+        self.ops['cross_entropy_losses'] = - loss
+
+        # corr_edge = tf.cast(tf.not_equal(self.ops['edge_predictions'],
+        #                                  tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1)),
+        #                     tf.float32)
+        corr_type_edge = tf.cast(tf.not_equal(tf.argmax(self.ops['edges_pred'], axis=1),
+                                              tf.argmax(gt, axis=1)),
+                                 tf.float32)
+
+        # self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=-1)
+        self.ops['edge_pred_error'] = 0.0
+        self.ops['edge_type_pred_error'] = tf.reduce_sum(corr_type_edge, axis=[1, 2])
+
+    def generate_edges(self, idx, edges_pred, valences):
         v = self.placeholders['num_vertices']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
+        edges_val_req = [i for i in range(self.num_edge_types + 1)]
+        edges_val_req = tf.expand_dims(edges_val_req, 0)
+        edges_val_req = tf.expand_dims(edges_val_req, 0)
+        edges_val_req = tf.tile(edges_val_req, [batch_size, v, 1])
 
         latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
         self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
-                                                                                latent_node_state], axis=2)   # [b, v, h + h]
+                                                                                latent_node_state],
+                                                                               axis=2)  # [b, v, h + h]
 
-        edge_logits = tf.matmul(self.ops["initial_repre_for_decoder"], tf.transpose(self.ops["initial_repre_for_decoder"], perm=[0, 2, 1]))  # [b, v, v]
-        edge_logits = tf.reshape(edge_logits, [-1, 1])  # [b * v* v, 1]
+        # node in focus feature
+        node_focus = filtered_z_sampled[:, idx, :]
+        node_focus = tf.expand_dims(node_focus, axis=1)
+        node_focus_feature = tf.tile(node_focus, [1, v, 1]) + filtered_z_sampled
 
+        # node in focus valences
+        node_focus_valences = valences[:, idx]
+        node_focus_valences = tf.expand_dims(node_focus_valences, axis=1)
+        node_focus_feature_valences = tf.tile(node_focus_valences, [1, v])
+
+        # generate mask
+        mask_min = tf.stack([node_focus_feature_valences, valences], axis=-1)
+        mask_min = tf.reduce_min(mask_min, -1)
+        mask_min = tf.tile(tf.expand_dims(mask_min, 2), [1,1,self.num_edge_types + 1])
+        #mask_min = tf.Print(mask_min, [mask_min[0]], message="mask_min", summarize=1000)  # TODO: pr
+        mask = tf.cast(edges_val_req <= mask_min, tf.float32)
+        # mask = tf.Print(mask, [mask[0]], message="equal", summarize=1000)  # TODO: pr
+        mask = tf.reshape(mask, [-1, self.num_edge_types + 1])
+
+
+        edge_rep = tf.reshape(node_focus_feature, [-1,h_dim_en + h_dim_de])  # [b * v, h_dec + h_enc]
         # num_edges + 1 -> num edges + no edge
-        final_molecule = tf.nn.softmax(
-            tf.matmul(edge_logits, self.weights['edge_gen']) + self.weights['edge_gen_bias'])  # [b, v*v, num_edges + 1]
-        final_molecule = tf.reshape(final_molecule, [batch_size, v, v, -1])
+        final_molecule_logits = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
+        final_molecule = tf.nn.softmax(final_molecule_logits + (mask * LARGE_NUMBER - LARGE_NUMBER))
+        final_molecule = tf.reshape(final_molecule, [batch_size, v, -1]) * self.ops['graph_state_mask']
 
-        self.ops['edge_type_predictions'] = tf.transpose(final_molecule[:, :, :, 1:], [0, 3, 2, 1])
-        self.ops['edge_predictions'] = 1 - tf.squeeze(final_molecule[:, :, :, 0])  # prob inverted
 
-        loss_edge = - tf.reduce_sum(tf.log(self.ops['edge_predictions'] + SMALL_NUMBER)
-                                    * tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1),
-                                    axis=[1,2])
+        edges_pred = edges_pred.write(idx, final_molecule)
+        return idx+1, edges_pred, valences
 
-        loss_edge_type = - tf.reduce_sum(tf.log(self.ops['edge_type_predictions'] + SMALL_NUMBER) *
-                                         self.placeholders['adjacency_matrix'],
-                                         axis=[1,2,3])
 
-        # final cross entropy losses
-        self.ops['cross_entropy_losses'] = loss_edge + loss_edge_type
-
-        corr_edge = tf.cast(tf.not_equal(tf.argmax(tf.nn.softmax(self.ops['edge_predictions']), axis=-1),
-                                         tf.argmax(tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1),
-                                                                 axis=-1)),
-                            tf.float32)
-        corr_type_edge = tf.cast(tf.not_equal(tf.argmax(self.ops['edge_type_predictions'], axis=-1),
-                                              tf.argmax(self.placeholders['adjacency_matrix'], axis=-1)),
-                                 tf.float32)
-
-        self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=-1)
-        self.ops['edge_type_pred_error'] = tf.reduce_sum(corr_type_edge, axis=[1, 2])
 
     def fully_connected(self, input, hidden_weight, hidden_bias, output_weight):
         output=tf.nn.relu(tf.matmul(input, hidden_weight) + hidden_bias)       
         output=tf.matmul(output, output_weight) 
         return output
 
-    def generate_cross_entropy(self, idx, cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error):
-        v = self.placeholders['num_vertices']
-        h_dim_en = self.params['hidden_size_encoder']
-        h_dim_de = self.params['hidden_size_decoder']
-        batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
-        # We still use the embedding of the atoms generated with the new drigoni function
-        # If we are doing reconstruction or training we use the atoms sampled in the nodes procdeure
-        # Note: If we use the TF in the node procedure, the sampled atoms are equal to the GT
-
-        latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
-
-        #latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"]) #original
-        # concat nodes with node symbols and use latent representation as decoder GNN'input
-        self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
-                                                                                latent_node_state], axis=2)   # [b, v, h + h]
-        # data needed in this iteration
-        incre_adj_mat = self.placeholders['incre_adj_mat'][:,idx,:,:, :]                                # [b, e, v, v]
-        distance_to_others = self.placeholders['distance_to_others'][:, idx, :]                         # [b,v]
-        overlapped_edge_features = self.placeholders['overlapped_edge_features'][:, idx, :] # [b,v]
-        node_sequence = self.placeholders['node_sequence'][:, idx, :] # [b, v]
-        node_sequence = tf.expand_dims(node_sequence, axis=2) # [b,v,1]
-        edge_type_masks = self.placeholders['edge_type_masks'][:, idx, :, :] # [b, e, v]
-        # make invalid locations to be very small before using softmax function
-        edge_type_masks = edge_type_masks * LARGE_NUMBER - LARGE_NUMBER
-        edge_type_labels = self.placeholders['edge_type_labels'][:, idx, :, :] # [b, e, v]
-        edge_masks=self.placeholders['edge_masks'][:, idx, :] # [b, v]
-        # make invalid locations to be very small before using softmax function
-        edge_masks = edge_masks * LARGE_NUMBER - LARGE_NUMBER
-        edge_labels = self.placeholders['edge_labels'][:, idx, :] # [b, v]
-        local_stop = self.placeholders['local_stop'][:, idx] # [b]
-        # concat the hidden states with the node in focus
-        filtered_z_sampled = tf.concat([filtered_z_sampled, node_sequence], axis=2) # [b, v, h + h + 1]
-        # Decoder GNN
-        if self.params["use_graph"]:
-            if self.params["residual_connection_on"]:
-                new_filtered_z_sampled = self.compute_final_node_representations_with_residual(filtered_z_sampled,
-                                                    tf.transpose(incre_adj_mat, [1, 0, 2, 3]),
-                                                    "_decoder") # [b, v, h + h]
-            else:
-                new_filtered_z_sampled = self.compute_final_node_representations_without_residual(filtered_z_sampled,
-                                                tf.transpose(incre_adj_mat, [1, 0, 2, 3]),
-                                                self.weights['edge_weights_decoder'],
-                                                self.weights['edge_biases_decoder'],
-                                                self.weights['node_gru_decoder'], "gru_scope_decoder") # [b, v, h + h]
-        elif self.params['use_gin']:
-            new_filtered_z_sampled = self.compute_final_node_with_GIN(filtered_z_sampled,
-                                                                      tf.transpose(incre_adj_mat,[1, 0, 2, 3]),
-                                                                      "_decoder")  # [b, v, h + h]
-        else:
-            new_filtered_z_sampled = filtered_z_sampled
-        # Filter nonexist nodes
-        new_filtered_z_sampled=new_filtered_z_sampled * self.ops['graph_state_mask']
-        # Take out the node in focus
-        node_in_focus = tf.reduce_sum(node_sequence * new_filtered_z_sampled, axis=1)# [b, h + h]
-        # edge pair representation
-        edge_repr=tf.concat(\
-            [tf.tile(tf.expand_dims(node_in_focus, 1), [1,v,1]), new_filtered_z_sampled], axis=2) # [b, v, 2*(h+h)]
-        # combine edge repre with local and global repr
-        local_graph_repr_before_expansion = tf.reduce_sum(new_filtered_z_sampled, axis=1) /  \
-                                            tf.reduce_sum(self.placeholders['node_mask'], axis=1, keep_dims=True) # [b, h + h] + 1?
-        local_graph_repr = tf.expand_dims(local_graph_repr_before_expansion, 1)
-        local_graph_repr = tf.tile(local_graph_repr, [1,v,1])  # [b, v, h+h]
-        global_graph_repr_before_expansion = tf.reduce_sum(filtered_z_sampled, axis=1) / \
-                                            tf.reduce_sum(self.placeholders['node_mask'], axis=1, keep_dims=True) # [b, h + h] + 1?
-        global_graph_repr = tf.expand_dims(global_graph_repr_before_expansion, 1)
-        global_graph_repr = tf.tile(global_graph_repr, [1,v,1]) # [b, v, h+h]
-        # distance representation
-        distance_repr = tf.nn.embedding_lookup(self.weights['distance_embedding'], distance_to_others) # [b, v, h+h] + 1?
-        # overlapped edge feature representation
-        overlapped_edge_repr = tf.nn.embedding_lookup(self.weights['overlapped_edge_weight'], overlapped_edge_features) # [b, v, h+h] + 1?
-        # concat and reshape.
-        combined_edge_repr = tf.concat([edge_repr, local_graph_repr, global_graph_repr, distance_repr, overlapped_edge_repr], axis=2)
-
-        combined_edge_repr = tf.reshape(combined_edge_repr, [-1, self.params["feature_dimension"]*(h_dim_en + h_dim_de + 1)])
-        # Calculate edge logits
-        edge_logits=self.fully_connected(combined_edge_repr, self.weights['edge_iteration'],
-                                        self.weights['edge_iteration_biases'], self.weights['edge_iteration_output'])
-        edge_logits=tf.reshape(edge_logits, [-1, v]) # [b, v]
-        # filter invalid terms
-        edge_logits=edge_logits + edge_masks
-        # Calculate whether it will stop at this step
-        # prepare the data
-        expanded_stop_node = tf.tile(self.weights['stop_node'], [batch_size, 1]) # [b, h + h]
-        distance_to_stop_node = tf.nn.embedding_lookup(self.weights['distance_embedding'], tf.tile([0], [batch_size]))     # [b, h + h]
-        overlap_edge_stop_node = tf.nn.embedding_lookup(self.weights['overlapped_edge_weight'], tf.tile([0], [batch_size]))     # [b, h + h]
-
-        combined_stop_node_repr = tf.concat([node_in_focus, expanded_stop_node, local_graph_repr_before_expansion,
-                                     global_graph_repr_before_expansion, distance_to_stop_node, overlap_edge_stop_node], axis=1) # [b, 6 * (h + h)]
-        # logits for stop node
-        stop_logits = self.fully_connected(combined_stop_node_repr,
-                            self.weights['edge_iteration'], self.weights['edge_iteration_biases'],
-                            self.weights['edge_iteration_output']) #[b, 1]
-        edge_logits = tf.concat([edge_logits, stop_logits], axis=1) # [b, v + 1]
-
-        # Calculate edge type logits
-        edge_type_logits = []
-        for i in range(self.num_edge_types):
-            edge_type_logit = self.fully_connected(combined_edge_repr,
-                              self.weights['edge_type_%d' % i], self.weights['edge_type_biases_%d' % i],
-                              self.weights['edge_type_output_%d' % i]) #[b * v, 1]
-            edge_type_logits.append(tf.reshape(edge_type_logit, [-1, 1, v])) # [b, 1, v]
-
-        edge_type_logits = tf.concat(edge_type_logits, axis=1) # [b, e, v]
-        # filter invalid items
-        edge_type_logits = edge_type_logits + edge_type_masks # [b, e, v]
-        # softmax over edge type axis
-        edge_type_probs = tf.nn.softmax(edge_type_logits, 1) # [b, e, v]
-
-        # edge labels
-        edge_labels = tf.concat([edge_labels,tf.expand_dims(local_stop, 1)], axis=1) # [b, v + 1]
-        # softmax for edge
-        edge_loss =- tf.reduce_sum(tf.log(tf.nn.softmax(edge_logits) + SMALL_NUMBER) * edge_labels, axis=1)
-        # softmax for edge type
-        edge_type_loss =- edge_type_labels * tf.log(edge_type_probs + SMALL_NUMBER) # [b, e, v]
-        edge_type_loss = tf.reduce_sum(edge_type_loss, axis=[1, 2]) # [b]
-        # total loss
-        iteration_loss = edge_loss + edge_type_loss
-        cross_entropy_losses = cross_entropy_losses.write(idx, iteration_loss)
-        edge_predictions = edge_predictions.write(idx, tf.nn.softmax(edge_logits))
-        edge_type_predictions = edge_type_predictions.write(idx, edge_type_probs)
-        # correct predictions
-        corr_edge = tf.cast(tf.not_equal(tf.argmax(tf.nn.softmax(edge_logits), axis=-1),
-                                                       tf.argmax(edge_labels, axis=-1)),
-                                          tf.float32)
-        corr_type_edge = tf.reduce_sum(tf.cast(tf.not_equal(tf.argmax(edge_type_probs, axis=-1),
-                                                            tf.argmax(edge_type_labels, axis=-1)),
-                                               tf.float32),
-                                       axis=-1)
-        edge_pred_error = edge_pred_error.write(idx, corr_edge)
-        edge_type_pred_error = edge_type_pred_error.write(idx, corr_type_edge)
-
-        return (idx+1, cross_entropy_losses, edge_predictions, edge_type_predictions, edge_pred_error, edge_type_pred_error)
 
     def construct_loss(self):
         v = self.placeholders['num_vertices']
@@ -871,9 +776,9 @@ class MolGVAE(ChemModel):
         latent_node_symbol = tf.cast(tf.not_equal(tf.argmax(self.ops['latent_node_symbols'], axis=-1),
                                           tf.argmax(self.placeholders['node_symbols'], axis=-1)),
                                      tf.float32)
-
-        number_correct_mols = self.ops['edge_pred_error'] + self.ops['edge_type_pred_error'] + tf.reduce_sum(latent_node_symbol, axis= -1)
-        self.ops['reconstruction'] = tf.reduce_sum(tf.cast(tf.equal(number_correct_mols, tf.zeros_like(number_correct_mols)), tf.float32))
+        mols_errors = self.ops['edge_pred_error'] + self.ops['edge_type_pred_error'] + tf.reduce_sum(latent_node_symbol, axis= -1)
+        # mols_errors = tf.Print(mols_errors, [mols_errors], message="mols_errors", summarize=1000)  # TODO: pr
+        self.ops['reconstruction'] = tf.reduce_sum(tf.cast(tf.equal(mols_errors, 0), tf.float32))
         # after because it rewrite the operations
         self.ops['node_pred_error'] = tf.reduce_mean(latent_node_symbol)
         self.ops['edge_pred_error'] = tf.reduce_mean(self.ops['edge_pred_error'])
@@ -1181,10 +1086,9 @@ class MolGVAE(ChemModel):
     """
     Prepare the feed dict for searching the edges amongs atoms
     """
-    def get_dynamic_edge_feed_dict(self, elements, latent_node_symbol, incre_adj_mat, num_vertices,
-                    distance_to_others, overlapped_edge_dense, node_sequence, edge_type_masks, edge_masks, latent_nodes):
+    def get_dynamic_edge_feed_dict(self, elements, latent_nodes, latent_node_symbol, num_vertices):
         return {
-                self.placeholders['incre_adj_mat']: incre_adj_mat,  # [1, 1, e, v, v]
+                self.placeholders['adjacency_matrix']: elements['adj_mat'],  # [1, 1, e, v, v]
                 self.placeholders['num_vertices']: num_vertices,  # v
                 self.ops['initial_nodes_decoder']: latent_nodes,
                 self.ops['latent_node_symbols']: latent_node_symbol,
@@ -1194,12 +1098,7 @@ class MolGVAE(ChemModel):
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
                 self.placeholders['iteration_mask']: [[1]],
                 self.placeholders['out_layer_dropout_keep_prob']: 1.0,
-                self.placeholders['distance_to_others'] : distance_to_others,  # [1, 1,v]
-                self.placeholders['overlapped_edge_features']: overlapped_edge_dense,
                 self.placeholders['max_iteration_num']: 1,
-                self.placeholders['node_sequence']: node_sequence,  #[1, 1, v]
-                self.placeholders['edge_type_masks']: edge_type_masks,  #[1, 1, e, v]
-                self.placeholders['edge_masks']: edge_masks,  # [1, 1, v]
             }
 
     """
@@ -1235,7 +1134,7 @@ class MolGVAE(ChemModel):
             one_hot_representations.append(representation)
         return one_hot_representations
 
-    def search_and_generate_molecule(self, initial_idx, valences, 
+    def search_and_generate_molecule(self, valences,
                              sampled_node_symbol, real_n_vertices,
                              elements, max_n_vertices, latent_nodes):
         # New molecule
@@ -1243,76 +1142,35 @@ class MolGVAE(ChemModel):
         new_mol = Chem.rdchem.RWMol(new_mol)
         # Add atoms
         add_atoms(new_mol, sampled_node_symbol, self.params["dataset"])
-        # Breadth first search over the molecule
-        queue=deque([initial_idx])
-        # color 0: have not found 1: in the queue 2: searched already
-        color = [0] * max_n_vertices
-        color[initial_idx] = 1
-        # Empty adj list at the beginning
-        incre_adj_list=defaultdict(list)
-        # record the log probabilities at each step
-        total_log_prob=0
-        while len(queue) > 0:
-            node_in_focus = queue.popleft()
-            # iterate until the stop node is selected 
-            while True:
-                # Prepare data for one iteration based on the graph state
-                edge_type_mask_sparse, edge_mask_sparse = generate_mask(valences, incre_adj_list, color, real_n_vertices, node_in_focus, self.params["check_overlap_edge"], new_mol)
-                edge_type_mask = edge_type_masks_to_dense([edge_type_mask_sparse], max_n_vertices, self.num_edge_types) # [1, e, v]
-                edge_mask = edge_masks_to_dense([edge_mask_sparse],max_n_vertices) # [1, v]
-                node_sequence = node_sequence_to_dense([node_in_focus], max_n_vertices) # [1, v]
-                distance_to_others_sparse = bfs_distance(node_in_focus, incre_adj_list)
-                distance_to_others = distance_to_others_dense([distance_to_others_sparse],max_n_vertices) # [1, v]
-                overlapped_edge_sparse = get_overlapped_edge_feature(edge_mask_sparse, color, new_mol)
-                          
-                overlapped_edge_dense = overlapped_edge_features_to_dense([overlapped_edge_sparse],max_n_vertices) # [1, v]
-                incre_adj_mat = incre_adj_mat_to_dense([incre_adj_list], self.num_edge_types, max_n_vertices) # [1, e, v, v]
-                sampled_node_symbol_one_hot = self.node_symbol_one_hot(sampled_node_symbol, real_n_vertices, max_n_vertices)
+        # Add edges
 
+        sampled_node_symbol_one_hot = self.node_symbol_one_hot(sampled_node_symbol, real_n_vertices, max_n_vertices)
 
-                # get feed_dict
-                feed_dict=self.get_dynamic_edge_feed_dict(elements, [sampled_node_symbol_one_hot],
-                            [incre_adj_mat], max_n_vertices, [distance_to_others], [overlapped_edge_dense],
-                            [node_sequence], [edge_type_mask], [edge_mask], latent_nodes)
-
-                # fetch nn predictions
-                fetch_list = [self.ops['edge_predictions'], self.ops['edge_type_predictions']]
-                edge_probs, edge_type_probs = self.sess.run(fetch_list, feed_dict=feed_dict)
-                # select an edge
+        # get feed_dict
+        feed_dict=self.get_dynamic_edge_feed_dict(elements, latent_nodes, [sampled_node_symbol_one_hot], max_n_vertices)
+        # fetch nn predictions
+        fetch_list = [self.ops['edges_pred']]
+        edges_pred = self.sess.run(fetch_list, feed_dict=feed_dict)
+        edge_selected = edges_pred[0]
+        for row in range(len(edge_selected[0])):
+            p1 = edge_selected[0,:, row,:]
+            p2 = np.array(elements['adj_mat'])[:, row]
+            for col in range(row+1, len(edge_selected[0])):  # only half matrix
+                # choose an edge type
                 if not self.params["use_argmax_bonds"]:
-                    neighbor=np.random.choice(np.arange(max_n_vertices+1), p=edge_probs[0])
+                    bond=np.random.choice(np.arange(self.num_edge_types),p=edge_selected[0, :, row, col])
                 else:
-                    neighbor=np.argmax(edge_probs[0])
-                # update log prob
-                total_log_prob+=np.log(edge_probs[0][neighbor]+SMALL_NUMBER)
-                # stop it if stop node is picked
-                if neighbor == max_n_vertices:
-                    break                    
-                # or choose an edge type
-                if not self.params["use_argmax_bonds"]:
-                    bond=np.random.choice(np.arange(self.num_edge_types),p=edge_type_probs[0, :, neighbor])
-                else:
-                    bond=np.argmax(edge_type_probs[0, :, neighbor])
-                # update log prob
-                total_log_prob+=np.log(edge_type_probs[0, :, neighbor][bond]+SMALL_NUMBER)
-                #update valences
-                valences[node_in_focus] -= (bond+1)
-                valences[neighbor] -= (bond+1)
-                #add the bond
-                new_mol.AddBond(int(node_in_focus), int(neighbor), number_to_bond[bond])
-                # add the edge to increment adj list
-                incre_adj_list[node_in_focus].append((neighbor, bond))
-                incre_adj_list[neighbor].append((node_in_focus, bond))
-                # Explore neighbor nodes
-                if color[neighbor]==0:
-                    queue.append(neighbor)
-                    color[neighbor]=1
-                current_mol = Chem.MolToSmiles(new_mol)
-            color[node_in_focus]=2    # explored
-        # Remove unconnected node     
+                    bond=np.argmax(edge_selected[0, :, row, col])
+                # add the bond
+                if bond != 0:  # because 0 implies the non existing edge
+                    bond = bond -1
+                    new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+
+
+        # Remove unconnected node
         remove_extra_nodes(new_mol)
         new_mol=Chem.MolFromSmiles(Chem.MolToSmiles(new_mol))
-        return new_mol, total_log_prob
+        return new_mol
 
     def gradient_ascent(self, random_normal_states, derivative_z_sampled):        
         return random_normal_states + self.params['prior_learning_rate'] * derivative_z_sampled
@@ -1354,42 +1212,13 @@ class MolGVAE(ChemModel):
         sampled_node_symbol = np.squeeze(real_values)[:real_length]
         # Maximum valences for each node
         valences = get_initial_valence(sampled_node_symbol, self.params["dataset"]) # [v]
-        # randomly pick the starting point or use zero 
-        if not self.params["path_random_order"]:
-            # Try different starting points
-            if self.params["try_different_starting"]:
-                starting_point=list(range(self.params["num_different_starting"]))
-                starting_point = [i for i in starting_point if i < real_length]
-            else:
-                starting_point=[0]
-        else:
-            if self.params["try_different_starting"]:
-                starting_point=random.sample(range(real_length), 
-                                      min(self.params["num_different_starting"], real_length))
-            else:
-                # starting_point=[random.choice(list(range(real_length)))] # randomly choose one
-                starting_point = [0]  # always start from the first
-        # record all molecules from different starting points
-        all_mol=[]
-        for idx in starting_point:
-            # generate a new molecule
-            new_mol, total_log_prob=self.search_and_generate_molecule(idx, np.copy(valences),
-                                                sampled_node_symbol, real_length,
-                                                elements, num_vertices, latent_nodes)
-            # record the molecule with largest number of shapes
-            if dataset=='qm9' and new_mol is not None:
-                all_mol.append((np.sum(shape_count(self.params["dataset"], True, [Chem.MolToSmiles(new_mol)])[1]), total_log_prob, new_mol))
-            # record the molecule with largest number of pentagon and hexagonal for zinc
-            elif dataset=='zinc' and new_mol is not None:
-                counts=shape_count(self.params["dataset"], True,[Chem.MolToSmiles(new_mol)])
-                all_mol.append((0.5 * counts[1][2] + counts[1][3], total_log_prob, new_mol))
 
-        # select one out
-        best_mol = select_best(all_mol)
-        # nothing generated
-        if best_mol is None:
-            return
-        generated_all_similes.append(Chem.MolToSmiles(best_mol))
+
+        # generate a new molecule
+        new_mol = self.search_and_generate_molecule(np.copy(valences), sampled_node_symbol, real_length,
+                                            elements, num_vertices, latent_nodes)
+
+        generated_all_similes.append(Chem.MolToSmiles(new_mol))
         # print(Chem.MolToSmiles(best_mol))  # TODO: pr
         # exit(0)  # TODO: exit
 
@@ -1501,7 +1330,7 @@ class MolGVAE(ChemModel):
                 # print("sampled_node_symbol: ", sampled_node_symbol)  # TODO: pr
                 # print("valences: ", valences)  # TODO: pr
                 # print("starting_point: ", starting_point)  # TODO: pr
-                new_mol, total_log_prob = self.search_and_generate_molecule(starting_point, np.copy(valences),
+                new_mol = self.search_and_generate_molecule(np.copy(valences),
                                                                             sampled_node_symbol, real_length,
                                                                             elements, num_vertices,
                                                                             latent_nodes)

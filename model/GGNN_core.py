@@ -352,9 +352,9 @@ class ChemModel(object):
                   "Node loss: %.4f | "
                   "KL loss: %.4f | "
                   "Prop loss: %.4f | "
-                  "Node pred: %.2f | "
-                  "Edge pred: (%.2f, %.2f) | "
-                  "Reconstruction: %.2f "%
+                  "Node pred: %.4f | "
+                  "Edge pred: (%.4f, %.4f) | "
+                  "Reconstruction: %.4f "%
                   (epoch_name, step, num_graphs,
                    loss / processed_graphs,
                    mean_edge_loss / processed_graphs,

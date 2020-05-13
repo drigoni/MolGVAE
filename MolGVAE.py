@@ -217,9 +217,9 @@ class MolGVAE(ChemModel):
 
 
         # Weights final part encoder. They map all nodes in one point in the latent space
-        self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en, h_dim_en]), name="mean_weights")
+        self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), h_dim_en]), name="mean_weights")
         self.weights['mean_biases'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32), name="mean_biases")
-        self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en, h_dim_en]), name="variance_weights")
+        self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), h_dim_en]), name="variance_weights")
         self.weights['variance_biases'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32), name="variance_biases")
 
         # histograms for the first part of the decoder
@@ -353,6 +353,7 @@ class MolGVAE(ChemModel):
         else:
             h_dim = self.params['hidden_size_encoder']
         h = tf.reshape(h, [-1, h_dim])  # [b*v, h]
+        weigths_concat = h
         for iter_idx in range(self.params['num_timesteps']):
             with tf.variable_scope("gin_scope"+scope_name+str(iter_idx), reuse=None) as g_scope:
                 for edge_type in range(self.num_edge_types):
@@ -370,12 +371,14 @@ class MolGVAE(ChemModel):
                 acts = tf.reshape(acts, [-1, h_dim])                                                    # [b*v, h]
                 input = tf.multiply((1 + self.weights['gin_epsilon']), h) + acts
                 h = self.weights['mlp' + scope_name + str(iter_idx)](input)
+                weigths_concat = tf.concat([weigths_concat, h], axis=1)
         last_h = tf.reshape(h, [-1, v, h_dim])
-        return last_h
+        lats_weigths_concat = tf.reshape(weigths_concat, [-1, v, h_dim * (self.params['num_timesteps'] + 1)])
+        return last_h, lats_weigths_concat
 
     def compute_mean_and_logvariance(self):
         h_dim = self.params['hidden_size_encoder']
-        reshped_last_h = tf.reshape(self.ops['final_node_representations'], [-1, h_dim])
+        reshped_last_h = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
         mean = tf.matmul(reshped_last_h, self.weights['mean_weights']) + self.weights['mean_biases']
         logvariance = tf.matmul(reshped_last_h, self.weights['variance_weights']) + self.weights['variance_biases']
         self.ops['mean'] = mean
@@ -654,8 +657,16 @@ class MolGVAE(ChemModel):
                 (tf.constant(0), edges_pred, valences)
             )
 
-        edges_pred = tf.transpose(edges_pred.stack(), [1,3,0,2])
-        self.ops['edges_pred'] = edges_pred * tf.expand_dims(self.ops['graph_state_mask'], 1)
+        self.ops['edges_pred'] = tf.transpose(edges_pred.stack(), [1,3,0,2])
+        # mask diagonal in order to put all probabilities to 1 in the non existence of the edge
+        diag_0 = tf.expand_dims(tf.one_hot(tf.range(v), depth=v, on_value=0.0, off_value=1.0, dtype=tf.float32), 0)
+        diag_1 = tf.expand_dims(tf.one_hot(tf.range(v), depth=v, dtype=tf.float32), 0)
+        mask_diag = diag_1
+        for i in range(self.num_edge_types):
+            mask_diag = tf.concat([mask_diag, tf.zeros_like(diag_0)], axis=0)
+        self.ops['edges_pred'] = self.ops['edges_pred'] * tf.expand_dims(diag_0, 0)
+        self.ops['edges_pred'] = self.ops['edges_pred'] + tf.expand_dims(mask_diag, 0)
+        self.ops['edges_pred'] = self.ops['edges_pred'] * tf.expand_dims(self.ops['graph_state_mask'], 1)
 
         gt = tf.expand_dims(1 - tf.reduce_sum(self.placeholders['adjacency_matrix'],
                                               axis=1),
@@ -672,11 +683,11 @@ class MolGVAE(ChemModel):
 
         # final cross entropy losses
         loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt, axis=[2, 3])
+        # self.ops['cross_entropy_losses'] =- tf.reduce_sum(loss_batchEdge * [0.05, 1, 2, 2], 1)
         loss = loss_batchEdge[:, 0]
-        # weights the loss for each class of edge
-        n_no_edges = tf.reduce_sum(gt[:, 0, :, :], axis=[1, 2])
+        n_no_edges = tf.reduce_sum(gt[:, 0, :, :])
         for i in range(1, self.num_edge_types + 1):
-            sum_tmp = tf.reduce_sum(gt[:, i, :, :], axis=[1, 2])
+            sum_tmp = tf.reduce_sum(gt[:, i, :, :])
             sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_no_edges)
             weights_temp = n_no_edges / sum_tmp
             loss += loss_batchEdge[:, i] * weights_temp
@@ -722,11 +733,10 @@ class MolGVAE(ChemModel):
         mask_min = tf.stack([node_focus_feature_valences, valences], axis=-1)
         mask_min = tf.reduce_min(mask_min, -1)
         mask_min = tf.tile(tf.expand_dims(mask_min, 2), [1,1,self.num_edge_types + 1])
-        #mask_min = tf.Print(mask_min, [mask_min[0]], message="mask_min", summarize=1000)  # TODO: pr
+        # mask_min = tf.Print(mask_min, [mask_min[0]], message="mask_min", summarize=1000)  # TODO: pr
         mask = tf.cast(edges_val_req <= mask_min, tf.float32)
-        # mask = tf.Print(mask, [mask[0]], message="equal", summarize=1000)  # TODO: pr
         mask = tf.reshape(mask, [-1, self.num_edge_types + 1])
-
+        # mask = tf.Print(mask, [mask[0]], message="mask", summarize=1000)  # TODO: pr
 
         edge_rep = tf.reshape(node_focus_feature, [-1,h_dim_en + h_dim_de])  # [b * v, h_dec + h_enc]
         # num_edges + 1 -> num edges + no edge

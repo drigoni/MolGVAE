@@ -237,8 +237,10 @@ class MolGVAE(ChemModel):
 
         # gen edges
         # self.weights['mlp_edges'] = MLP(h_dim_en+h_dim_de, 20, [h_dim_de, h_dim_de], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_en+h_dim_de, self.num_edge_types + 1]))
-        self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types + 1]).astype(np.float32))
+        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_en + h_dim_de, 1]))
+        self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32))
+        self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_en + h_dim_de, self.num_edge_types]))
+        self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32))
 
         feature_dimension = 6 * expanded_h_dim
         # record the total number of features
@@ -651,65 +653,65 @@ class MolGVAE(ChemModel):
 
         #    The tensor array used to collect the cross entropy losses at each step
         edges_pred = tf.TensorArray(dtype=tf.float32, size=v)
-        idx_final, edges_pred, _= \
+        edges_type_pred = tf.TensorArray(dtype=tf.float32, size=v)
+        idx_final, edges_pred, edges_type_pred, _ = \
             tf.while_loop(
-                lambda idx, edges_pred, valences: idx < v, self.generate_edges,
-                (tf.constant(0), edges_pred, valences)
+                lambda idx, edges_pred, edges_type_pred, valences: idx < v, self.generate_edges,
+                (tf.constant(0), edges_pred, edges_type_pred, valences)
             )
 
-        self.ops['edges_pred'] = tf.transpose(edges_pred.stack(), [1,3,0,2])
-        # mask diagonal in order to put all probabilities to 1 in the non existence of the edge
-        diag_0 = tf.expand_dims(tf.one_hot(tf.range(v), depth=v, on_value=0.0, off_value=1.0, dtype=tf.float32), 0)
-        diag_1 = tf.expand_dims(tf.one_hot(tf.range(v), depth=v, dtype=tf.float32), 0)
-        mask_diag = diag_1
-        for i in range(self.num_edge_types):
-            mask_diag = tf.concat([mask_diag, tf.zeros_like(diag_0)], axis=0)
-        self.ops['edges_pred'] = self.ops['edges_pred'] * tf.expand_dims(diag_0, 0)
-        self.ops['edges_pred'] = self.ops['edges_pred'] + tf.expand_dims(mask_diag, 0)
-        self.ops['edges_pred'] = self.ops['edges_pred'] * tf.expand_dims(self.ops['graph_state_mask'], 1)
+        self.ops['edges_pred'] = tf.transpose(edges_pred.stack(), [1,0,2]) * self.ops['graph_state_mask']
+        self.ops['edges_type_pred'] = tf.transpose(edges_type_pred.stack(), [1, 3, 0, 2])
 
-        gt = tf.expand_dims(1 - tf.reduce_sum(self.placeholders['adjacency_matrix'],
-                                              axis=1),
-                            axis=1)
-        gt = tf.concat([gt, self.placeholders['adjacency_matrix']],
-                       axis=1)
+        # mask diagonal in order to put all probabilities to 1 in the non existence of the edge
+        diag_0 = tf.one_hot(tf.range(v), depth=v, on_value=0.0, off_value=1.0, dtype=tf.float32)
+        self.ops['edges_pred'] = self.ops['edges_pred'] * tf.expand_dims(diag_0, 0)
+
+        gt_edges_pred = tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1)
+        gt_edges_type_pred = self.placeholders['adjacency_matrix']
 
         # gt = tf.Print(gt, [gt[0,:,0,0]], message="adj", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [self.ops['edges_pred'][0,:,0,0]], message="pred", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [valences[0,:]], message="valences", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [indexes[0,:]], message = "mol", summarize = 1000)  # TODO: pr
-        # gt = tf.Print(gt, [tf.reduce_sum(gt, 1)[0,0]], message="adj", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [tf.reduce_sum(self.ops['edges_pred'], 1)[0,0]], message="pred", summarize=1000)  # TODO: pr
 
-        # final cross entropy losses
-        loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt, axis=[2, 3])
-        # self.ops['cross_entropy_losses'] =- tf.reduce_sum(loss_batchEdge * [0.05, 1, 2, 2], 1)
-        loss = loss_batchEdge[:, 0]
-        n_no_edges = tf.reduce_sum(gt[:, 0, :, :])
-        for i in range(1, self.num_edge_types + 1):
-            sum_tmp = tf.reduce_sum(gt[:, i, :, :])
-            sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_no_edges)
-            weights_temp = n_no_edges / sum_tmp
-            loss += loss_batchEdge[:, i] * weights_temp
-        self.ops['cross_entropy_losses'] = - loss
+        # binary cross-entropy masked and balanced
+        n_yes_edges = tf.reduce_sum(gt_edges_pred)
+        n_no_edges = tf.reduce_sum(1 - gt_edges_pred)
 
-        # corr_edge = tf.cast(tf.not_equal(self.ops['edge_predictions'],
-        #                                  tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1)),
-        #                     tf.float32)
-        corr_type_edge = tf.cast(tf.not_equal(tf.argmax(self.ops['edges_pred'], axis=1),
-                                              tf.argmax(gt, axis=1)),
+        edge_loss =- tf.reduce_sum((tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred)*(n_no_edges/n_yes_edges) +
+                                   tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1-gt_edges_pred),
+                                   axis=[1, 2])
+
+        # edge type cross entropy balanced and masked
+        loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred, axis=[2, 3])
+        edge_type_loss = loss_batchEdge[:, 0]
+        n_type_1_edge = tf.reduce_sum(gt_edges_type_pred[:, 0, :, :])
+        for i in range(0, self.num_edge_types):
+            sum_tmp = tf.reduce_sum(gt_edges_type_pred[:, i, :, :])
+            sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_type_1_edge)
+            weights_temp = n_type_1_edge / sum_tmp
+            edge_type_loss += loss_batchEdge[:, i] * weights_temp
+        edge_type_loss = - edge_type_loss
+        # edge_type_loss =- tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred,
+        #                                 axis=[1, 2, 3])
+
+        self.ops['cross_entropy_losses'] = edge_loss + edge_type_loss
+
+        corr_edge = tf.cast(self.ops['edges_pred'] >= 0.5, tf.float32)
+        corr_edge = tf.cast(tf.not_equal(corr_edge, gt_edges_pred),
+                             tf.float32)
+        edges_type_pred_masked = self.ops['edges_type_pred'] * tf.expand_dims(gt_edges_pred, axis=1)
+        corr_type_edge = tf.cast(tf.not_equal(tf.argmax(edges_type_pred_masked, axis=1),
+                                              tf.argmax(gt_edges_type_pred, axis=1)),
                                  tf.float32)
 
-        # self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=-1)
-        self.ops['edge_pred_error'] = 0.0
+        self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=[1, 2])
         self.ops['edge_type_pred_error'] = tf.reduce_sum(corr_type_edge, axis=[1, 2])
 
-    def generate_edges(self, idx, edges_pred, valences):
+    def generate_edges(self, idx, edges_pred, edges_type_pred, valences):
         v = self.placeholders['num_vertices']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
-        edges_val_req = [i for i in range(self.num_edge_types + 1)]
+        edges_val_req = [i+1 for i in range(0, self.num_edge_types)]
         edges_val_req = tf.expand_dims(edges_val_req, 0)
         edges_val_req = tf.expand_dims(edges_val_req, 0)
         edges_val_req = tf.tile(edges_val_req, [batch_size, v, 1])
@@ -732,21 +734,26 @@ class MolGVAE(ChemModel):
         # generate mask
         mask_min = tf.stack([node_focus_feature_valences, valences], axis=-1)
         mask_min = tf.reduce_min(mask_min, -1)
-        mask_min = tf.tile(tf.expand_dims(mask_min, 2), [1,1,self.num_edge_types + 1])
+        mask_min = tf.tile(tf.expand_dims(mask_min, 2), [1,1, self.num_edge_types])
         # mask_min = tf.Print(mask_min, [mask_min[0]], message="mask_min", summarize=1000)  # TODO: pr
         mask = tf.cast(edges_val_req <= mask_min, tf.float32)
-        mask = tf.reshape(mask, [-1, self.num_edge_types + 1])
+        mask = tf.reshape(mask, [-1, self.num_edge_types])
         # mask = tf.Print(mask, [mask[0]], message="mask", summarize=1000)  # TODO: pr
 
         edge_rep = tf.reshape(node_focus_feature, [-1,h_dim_en + h_dim_de])  # [b * v, h_dec + h_enc]
-        # num_edges + 1 -> num edges + no edge
-        final_molecule_logits = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
-        final_molecule = tf.nn.softmax(final_molecule_logits + (mask * LARGE_NUMBER - LARGE_NUMBER))
-        final_molecule = tf.reshape(final_molecule, [batch_size, v, -1]) * self.ops['graph_state_mask']
+        edge_pred_tmp = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
+        edge_pred_tmp = tf.nn.sigmoid(edge_pred_tmp)
+        edge_pred_tmp = tf.reshape(edge_pred_tmp, [batch_size, v, 1]) * self.ops['graph_state_mask']
+        edge_pred_tmp = tf.squeeze(edge_pred_tmp, axis=-1)
+
+        edge_type_pred_tmp = tf.matmul(edge_rep, self.weights['edge_type_gen']) + self.weights['edge_type_gen_bias']  # [b*v, num_edges + 1]
+        edge_type_pred_tmp = tf.nn.softmax(edge_type_pred_tmp + (mask * LARGE_NUMBER - LARGE_NUMBER))
+        edge_type_pred_tmp = tf.reshape(edge_type_pred_tmp, [batch_size, v, self.num_edge_types]) * self.ops['graph_state_mask']
 
 
-        edges_pred = edges_pred.write(idx, final_molecule)
-        return idx+1, edges_pred, valences
+        edges_pred = edges_pred.write(idx, edge_pred_tmp)
+        edges_type_pred = edges_type_pred.write(idx, edge_type_pred_tmp)
+        return idx+1, edges_pred, edges_type_pred, valences
 
 
 
@@ -1159,21 +1166,20 @@ class MolGVAE(ChemModel):
         # get feed_dict
         feed_dict=self.get_dynamic_edge_feed_dict(elements, latent_nodes, [sampled_node_symbol_one_hot], max_n_vertices)
         # fetch nn predictions
-        fetch_list = [self.ops['edges_pred']]
-        edges_pred = self.sess.run(fetch_list, feed_dict=feed_dict)
-        edge_selected = edges_pred[0]
-        for row in range(len(edge_selected[0])):
-            p1 = edge_selected[0,:, row,:]
-            p2 = np.array(elements['adj_mat'])[:, row]
-            for col in range(row+1, len(edge_selected[0])):  # only half matrix
-                # choose an edge type
-                if not self.params["use_argmax_bonds"]:
-                    bond=np.random.choice(np.arange(self.num_edge_types),p=edge_selected[0, :, row, col])
-                else:
-                    bond=np.argmax(edge_selected[0, :, row, col])
-                # add the bond
-                if bond != 0:  # because 0 implies the non existing edge
-                    bond = bond -1
+        fetch_list = [self.ops['edge_predictions'], self.ops['edge_type_predictions']]
+        edge_probs, edge_type_probs = self.sess.run(fetch_list, feed_dict=feed_dict)
+        edge_probs = edge_probs[0]
+        edge_probs_bin = edge_probs > 0.5
+        edge_type_probs = edge_type_probs[0]
+        for row in range(len(edge_probs[0])):
+            for col in range(row+1, len(edge_probs[0])):  # only half matrix
+                if edge_probs_bin[row, col] == True:
+                    # choose an edge type
+                    if not self.params["use_argmax_bonds"]:
+                        bond=np.random.choice(np.arange(self.num_edge_types),p=edge_type_probs[:, row, col])
+                    else:
+                        bond=np.argmax(edge_type_probs[:, row, col])
+                    # add the bond
                     new_mol.AddBond(int(row), int(col), number_to_bond[bond])
 
 

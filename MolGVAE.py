@@ -113,7 +113,7 @@ class MolGVAE(ChemModel):
                         'check_overlap_edge': False,
                         "truncate_distance": 10,
                         "use_gpu": True,
-                        "use_rec_multi_threads": True,
+                        "use_rec_multi_threads": False,
                         "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
                         })
 
@@ -746,7 +746,7 @@ class MolGVAE(ChemModel):
         mask = tf.reshape(mask, [-1, self.num_edge_types + 1])
         # mask = tf.Print(mask, [mask[0]], message="mask", summarize=1000)  # TODO: pr
 
-        edge_rep = tf.reshape(input_features, [-1,h_dim_en + h_dim_de])  # [b * v, h_dec + h_enc]
+        edge_rep = tf.reshape(input_features, [-1,4*(h_dim_en + h_dim_de)])  # [b * v,4(h_dec + h_enc)]
         # num_edges + 1 -> num edges + no edge
         final_molecule_logits = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
         final_molecule = tf.nn.softmax(final_molecule_logits + (mask * LARGE_NUMBER - LARGE_NUMBER))
@@ -1187,7 +1187,7 @@ class MolGVAE(ChemModel):
 
         # Remove unconnected node
         remove_extra_nodes(new_mol)
-        new_mol=Chem.MolFromSmiles(Chem.MolToSmiles(new_mol))
+        new_mol = Chem.MolFromSmiles(Chem.MolToSmiles(new_mol))
         return new_mol
 
     def gradient_ascent(self, random_normal_states, derivative_z_sampled):        
@@ -1235,8 +1235,11 @@ class MolGVAE(ChemModel):
         # generate a new molecule
         new_mol = self.search_and_generate_molecule(np.copy(valences), sampled_node_symbol, real_length,
                                             elements, num_vertices, latent_nodes)
+        if new_mol is None:
+            generated_all_similes.append('None')
+        else:
+            generated_all_similes.append(Chem.MolToSmiles(new_mol))
 
-        generated_all_similes.append(Chem.MolToSmiles(new_mol))
         # print(Chem.MolToSmiles(best_mol))  # TODO: pr
         # exit(0)  # TODO: exit
 
@@ -1353,8 +1356,9 @@ class MolGVAE(ChemModel):
                                                                             elements, num_vertices,
                                                                             latent_nodes)
                 if new_mol is None:
-                    new_mol = "None"
-                all_decoded.append(Chem.MolToSmiles(new_mol))
+                    all_decoded.append('None')
+                else:
+                    all_decoded.append(Chem.MolToSmiles(new_mol))
                 # print(Chem.MolToSmiles(new_mol))  # TODO: pr
 
         generated_all_similes.append(all_decoded)

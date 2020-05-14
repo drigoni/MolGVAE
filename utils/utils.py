@@ -35,7 +35,8 @@ def dataset_info(dataset):
                 'max_valence_value': 9,
                 'max_n_atoms': 30,
                 'number_to_atom': {0: "H", 1: "C", 2: "N", 3: "O", 4: "F"},
-                'bucket_sizes': np.array(list(range(4, 28, 2)) + [29])
+                'bucket_sizes': np.array(list(range(4, 28, 2)) + [29]),
+                'loss_edge_weights': [6787404, 1882538,  223084,   63896]
                }
     elif dataset == 'zinc':
         return {'atom_types': ['Br1(0)', 'C4(0)', 'Cl1(0)', 'F1(0)', 'H1(0)', 'I1(0)', 'N2(-1)', 'N3(0)', 'N4(1)', 'O1(-1)',
@@ -48,7 +49,8 @@ def dataset_info(dataset):
                 'number_to_atom': {0: 'Br', 1: 'C', 2: 'Cl', 3: 'F', 4: 'H', 5:'I', 6: 'N', 7: 'N', 8: 'N', 9:'O', 10: 'O',
                                    11: 'S', 12: 'S', 13: 'S'},
                 'bucket_sizes': np.array([28, 31, 33, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 53, 55, 58,
-                                          84])
+                                          84]),
+                'loss_edge_weights': [111623688, 8153922, 2791900, 27394]
                }
     else:
         print("Error: The datasets that you could use are QM9 or ZINC, not " + str(dataset))

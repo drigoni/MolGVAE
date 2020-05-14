@@ -115,6 +115,7 @@ class MolGVAE(ChemModel):
                         "use_gpu": True,
                         "use_rec_multi_threads": True,
                         "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
+                        "loss_normalized_per_batch": False
                         })
 
         return params
@@ -673,25 +674,45 @@ class MolGVAE(ChemModel):
         gt_edges_type_pred = self.placeholders['adjacency_matrix']
         # gt = tf.Print(gt, [gt[0,:,0,0]], message="adj", summarize=1000)  # TODO: pr
 
-        # binary cross-entropy balanced
-        n_yes_edges = tf.reduce_sum(gt_edges_pred)
-        n_no_edges = tf.reduce_sum(1 - gt_edges_pred)
-        edge_loss =- tf.reduce_sum((tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred)*(n_no_edges/n_yes_edges) +
-                                   tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1-gt_edges_pred),
-                                   axis=[1, 2])
+        if self.params['loss_normalized_per_batch']:
+            # binary cross-entropy balanced
+            n_yes_edges = tf.reduce_sum(gt_edges_pred)
+            n_no_edges = tf.reduce_sum(1 - gt_edges_pred)
+            edge_loss =- tf.reduce_sum((tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred)*(n_no_edges/n_yes_edges) +
+                                       tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1-gt_edges_pred),
+                                       axis=[1, 2])
 
-        # edge type cross entropy balanced
-        loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred, axis=[2, 3])
-        edge_type_loss = loss_batchEdge[:, 0]
-        n_type_1_edge = tf.reduce_sum(gt_edges_type_pred[:, 0, :, :])
-        for i in range(0, self.num_edge_types):
-            sum_tmp = tf.reduce_sum(gt_edges_type_pred[:, i, :, :])
-            sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_type_1_edge)
-            weights_temp = n_type_1_edge / sum_tmp
-            edge_type_loss += loss_batchEdge[:, i] * weights_temp
-        edge_type_loss = - edge_type_loss
-        # edge_type_loss =- tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred,
-        #                                 axis=[1, 2, 3])
+            # edge type cross entropy balanced
+            loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred, axis=[2, 3])
+            edge_type_loss = loss_batchEdge[:, 0]
+            n_type_1_edge = tf.reduce_sum(gt_edges_type_pred[:, 0, :, :])
+            for i in range(1, self.num_edge_types):
+                sum_tmp = tf.reduce_sum(gt_edges_type_pred[:, i, :, :])
+                sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_type_1_edge)
+                weights_temp = n_type_1_edge / sum_tmp
+                edge_type_loss += loss_batchEdge[:, i] * weights_temp
+            edge_type_loss = - edge_type_loss
+        else:
+            # binary cross-entropy balanced
+            edge_weights = dataset_info(self.params['dataset'])['loss_edge_weights']
+            n_yes_edges = np.sum(edge_weights[1:])
+            n_no_edges = edge_weights[0]
+            edge_loss = - tf.reduce_sum(
+                (tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred) * (n_no_edges / n_yes_edges) +
+                tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1 - gt_edges_pred),
+                axis=[1, 2])
+
+            # edge type cross entropy balanced
+            loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred,
+                                           axis=[2, 3])
+            edge_type_loss = loss_batchEdge[:, 0]
+            n_type_1_edge = edge_weights[1]
+            for i in range(2, self.num_edge_types+1):
+                n_type_i = edge_weights[i]
+                n_type_i = n_type_i if n_type_i > 0 else n_type_1_edge
+                weights_temp = n_type_1_edge / n_type_i
+                edge_type_loss += loss_batchEdge[:, i-1] * weights_temp
+            edge_type_loss = - edge_type_loss
 
         # sum losses
         self.ops['cross_entropy_losses'] = edge_loss + edge_type_loss
@@ -1193,7 +1214,8 @@ class MolGVAE(ChemModel):
 
         # Remove unconnected node
         remove_extra_nodes(new_mol)
-        new_mol=Chem.MolFromSmiles(Chem.MolToSmiles(new_mol))
+        smiles = Chem.MolToSmiles(new_mol)
+        new_mol=Chem.MolFromSmiles(smiles)
         return new_mol
 
     def gradient_ascent(self, random_normal_states, derivative_z_sampled):        

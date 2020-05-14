@@ -237,7 +237,7 @@ class MolGVAE(ChemModel):
 
         # gen edges
         # self.weights['mlp_edges'] = MLP(h_dim_en+h_dim_de, 20, [h_dim_de, h_dim_de], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_en+h_dim_de, self.num_edge_types + 1]))
+        self.weights['edge_gen'] = tf.Variable(glorot_init([4*(h_dim_en+h_dim_de), self.num_edge_types + 1]))
         self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types + 1]).astype(np.float32))
 
         feature_dimension = 6 * expanded_h_dim
@@ -719,10 +719,18 @@ class MolGVAE(ChemModel):
                                                                                 latent_node_state],
                                                                                axis=2)  # [b, v, h + h]
 
+        # graph features
+        graph_sum = tf.reduce_sum(filtered_z_sampled, axis=1, keep_dims=True)  # [b, 1, 2h]
+        graph_sum = tf.tile(graph_sum, [1, v, 1])
+        graph_prod = tf.reduce_prod(filtered_z_sampled, axis=1, keep_dims=True)  # [b, 1, 2h]
+        graph_prod = tf.tile(graph_prod, [1, v, 1])
+
         # node in focus feature
         node_focus = filtered_z_sampled[:, idx, :]
         node_focus = tf.expand_dims(node_focus, axis=1)
-        node_focus_feature = tf.tile(node_focus, [1, v, 1]) + filtered_z_sampled
+        node_focus_sum = tf.tile(node_focus, [1, v, 1]) + filtered_z_sampled
+        node_focus_prod = tf.tile(node_focus, [1, v, 1]) * filtered_z_sampled  # [b, v, 2h]
+        input_features = tf.concat([node_focus_sum, node_focus_prod, graph_sum, graph_prod], axis=-1)
 
         # node in focus valences
         node_focus_valences = valences[:, idx]
@@ -738,7 +746,7 @@ class MolGVAE(ChemModel):
         mask = tf.reshape(mask, [-1, self.num_edge_types + 1])
         # mask = tf.Print(mask, [mask[0]], message="mask", summarize=1000)  # TODO: pr
 
-        edge_rep = tf.reshape(node_focus_feature, [-1,h_dim_en + h_dim_de])  # [b * v, h_dec + h_enc]
+        edge_rep = tf.reshape(input_features, [-1,h_dim_en + h_dim_de])  # [b * v, h_dec + h_enc]
         # num_edges + 1 -> num edges + no edge
         final_molecule_logits = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
         final_molecule = tf.nn.softmax(final_molecule_logits + (mask * LARGE_NUMBER - LARGE_NUMBER))

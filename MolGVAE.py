@@ -1242,9 +1242,10 @@ class MolGVAE(ChemModel):
         new_mol = self.search_and_generate_molecule(np.copy(valences), sampled_node_symbol, real_length,
                                             elements, num_vertices, latent_nodes)
 
-        generated_all_similes.append(Chem.MolToSmiles(new_mol))
-        # print(Chem.MolToSmiles(best_mol))  # TODO: pr
-        # exit(0)  # TODO: exit
+        if new_mol is None:
+            generated_all_similes.append('None')
+        else:
+            generated_all_similes.append(Chem.MolToSmiles(new_mol))
 
         n_gen_max = self.params['number_of_generation']
         n_gen_cur = len(generated_all_similes)
@@ -1359,8 +1360,9 @@ class MolGVAE(ChemModel):
                                                                             elements, num_vertices,
                                                                             latent_nodes)
                 if new_mol is None:
-                    new_mol = "None"
-                all_decoded.append(Chem.MolToSmiles(new_mol))
+                    all_decoded.append('None')
+                else:
+                    all_decoded.append(Chem.MolToSmiles(new_mol))
                 # print(Chem.MolToSmiles(new_mol))  # TODO: pr
 
         generated_all_similes.append(all_decoded)

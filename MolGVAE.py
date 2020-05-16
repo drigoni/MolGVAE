@@ -115,7 +115,8 @@ class MolGVAE(ChemModel):
                         "use_gpu": True,
                         "use_rec_multi_threads": True,
                         "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
-                        "loss_normalized_per_batch": False
+                        "loss_normalized_per_batch": False,
+                        "fix_molecule_validation": True
                         })
 
         return params
@@ -237,10 +238,12 @@ class MolGVAE(ChemModel):
 
 
         # gen edges
-        # self.weights['mlp_edges'] = MLP(h_dim_en+h_dim_de, 20, [h_dim_de, h_dim_de], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_gen'] = tf.Variable(glorot_init([4*(h_dim_en + h_dim_de), 1]))
+        dim_features_weights = 4*(h_dim_en + h_dim_de)
+        self.weights['edge_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, 1]))
         self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32))
-        self.weights['edge_type_gen'] = tf.Variable(glorot_init([4*(h_dim_en + h_dim_de), self.num_edge_types]))
+        self.weights['edge_type_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types]))
         self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32))
 
         feature_dimension = 6 * expanded_h_dim
@@ -733,6 +736,7 @@ class MolGVAE(ChemModel):
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
+
         edges_val_req = [i+1 for i in range(0, self.num_edge_types)]
         edges_val_req = tf.expand_dims(edges_val_req, 0)
         edges_val_req = tf.expand_dims(edges_val_req, 0)
@@ -754,6 +758,7 @@ class MolGVAE(ChemModel):
         node_focus_sum = tf.tile(node_focus, [1, v, 1]) + filtered_z_sampled
         node_focus_prod = tf.tile(node_focus, [1, v, 1]) * filtered_z_sampled  # [b, v, 2h]
         input_features = tf.concat([node_focus_sum, node_focus_prod, graph_sum, graph_prod], axis=-1)
+        dim_input_network = 4 * (h_dim_en + h_dim_de)
 
         # node in focus valences
         node_focus_valences = valences[:, idx]
@@ -769,13 +774,17 @@ class MolGVAE(ChemModel):
         mask = tf.reshape(mask, [-1, self.num_edge_types])
         # mask = tf.Print(mask, [mask[0]], message="mask", summarize=1000)  # TODO: pr
 
-        edge_rep = tf.reshape(input_features, [-1,4*(h_dim_en + h_dim_de)])  # [b * v, 4(h_dec + h_enc)]
-        edge_pred_tmp = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
+        # edge prediction
+        edge_rep = tf.reshape(input_features, [-1, dim_input_network])
+        edge_pred_tmp = self.weights['edge_gen_mlp'](edge_rep)
+        edge_pred_tmp = tf.matmul(edge_pred_tmp, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
         edge_pred_tmp = tf.nn.sigmoid(edge_pred_tmp)
         edge_pred_tmp = tf.reshape(edge_pred_tmp, [batch_size, v, 1]) * self.ops['graph_state_mask']
         edge_pred_tmp = tf.squeeze(edge_pred_tmp, axis=-1)
 
-        edge_type_pred_tmp = tf.matmul(edge_rep, self.weights['edge_type_gen']) + self.weights['edge_type_gen_bias']  # [b*v, num_edges + 1]
+        # edge type prediction
+        edge_type_pred_tmp = self.weights['edge_type_gen_mlp'](edge_rep)
+        edge_type_pred_tmp = tf.matmul(edge_type_pred_tmp, self.weights['edge_type_gen']) + self.weights['edge_type_gen_bias']  # [b*v, num_edges + 1]
         edge_type_pred_tmp = tf.nn.softmax(edge_type_pred_tmp + (mask * LARGE_NUMBER - LARGE_NUMBER))
         edge_type_pred_tmp = tf.reshape(edge_type_pred_tmp, [batch_size, v, self.num_edge_types]) * self.ops['graph_state_mask']
 
@@ -931,6 +940,7 @@ class MolGVAE(ChemModel):
                 else:
                     incremental_results.append([incremental_adj_mat, distance_to_others, node_sequence, edge_type_masks, 
                                                edge_type_labels, local_stop, edge_masks, edge_labels, overlapped_edge_features])
+
                     # copy the raw_data here 
                     new_raw_data.append(d)
                 if idx % 50 == 0:
@@ -1209,7 +1219,14 @@ class MolGVAE(ChemModel):
                     else:
                         bond=np.argmax(edge_type_probs[:, row, col])
                     # add the bond
-                    new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+                    if self.params['fix_molecule_validation']:
+                        if min(valences[row], valences[col]) >= bond + 1:
+                            new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+                            valences[row] -= bond + 1
+                            valences[col] -= bond + 1
+                    else:
+                        new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+
 
 
         # Remove unconnected node

@@ -24,6 +24,19 @@ from collections import defaultdict
 # get current directory in order to work with full path and not dynamic
 current_dir = os.path.dirname(os.path.realpath(__file__))
 
+
+
+# add one edge to adj matrix
+def add_edge_mat(amat, src, dest, e):
+    amat[e, dest, src] = 1
+    amat[e, src, dest] = 1
+
+def graph_to_adj_mat(graph, max_n_vertices, num_edge_types):
+    amat = np.zeros((num_edge_types, max_n_vertices, max_n_vertices))
+    for src, e, dest in graph:
+        add_edge_mat(amat, src, dest, e)
+    return amat
+
 def load_filter(data, number):
     res = []
     for n, s in enumerate(data):
@@ -81,15 +94,24 @@ def count_number_atoms(data, dataset):
 
 
 def count_edges(data):
-    edge_type_this_molecule = [0] * len(utils.bond_dict)
+    num_fwd_edge_types = len(utils.bond_dict) - 1
+    num_edge_types = num_fwd_edge_types
+    edge_type = np.zeros(num_fwd_edge_types + 1)
+
     for s in data:
-        for edge in s['graph']:
-            edge_type = edge[1]
-            edge_type_this_molecule[edge_type] += 1
-    edge_sum = sum(edge_type_this_molecule)
-    print('Types of edges: ', edge_type_this_molecule)
+        n_atoms = len(s['node_features'])
+        smiles = s['smiles']
+        adj_mat = graph_to_adj_mat(s['graph'], n_atoms, num_edge_types)
+        no_edge = 1 - np.sum(adj_mat, axis=0, keepdims=True)
+        adj_mat = np.concatenate([no_edge, adj_mat], axis=0)
+        for edge in range(num_fwd_edge_types + 1):
+            tmp_sum = np.sum(adj_mat[edge, :, :])
+            edge_type[edge] += tmp_sum
+
+    print('Types of edges: ', edge_type)
+    edge_sum = sum(edge_type)
     if edge_sum > 0:
-        print('Types of edges %: ', [v / edge_sum for v in edge_type_this_molecule])
+        print('Types of edges %: ', [v / edge_sum for v in edge_type])
     else:
         print('Types of edges %: ', 'division by 0')
 

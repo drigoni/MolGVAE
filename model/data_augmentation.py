@@ -152,7 +152,7 @@ def construct_incremental_graph(dataset, edges, max_n_vertices, real_n_vertices,
     # calculate keep probability
     sample_transition_count= real_n_vertices + len(edges)/2
     keep_prob= float(sample_transition_count)/((real_n_vertices + len(edges)/2) * params["bfs_path_count"])  # to form a binomial distribution
-    while len(queue) > 0:
+    while len(queue) > 0 and len(queue) <= 2:  # TODO: solo per far prima
         node_in_focus=queue.popleft()
         current_adj_list=graph[node_in_focus]
         # sort (canonical order) it or shuffle (random order) it 

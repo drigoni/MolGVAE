@@ -115,6 +115,8 @@ class MolGVAE(ChemModel):
                         "use_gpu": True,
                         "use_rec_multi_threads": False,
                         "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
+                        "loss_normalized_per_batch": False,
+                        "fix_molecule_validation": True
                         })
 
         return params
@@ -236,9 +238,14 @@ class MolGVAE(ChemModel):
 
 
         # gen edges
-        # self.weights['mlp_edges'] = MLP(h_dim_en+h_dim_de, 20, [h_dim_de, h_dim_de], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_gen'] = tf.Variable(glorot_init([4*(h_dim_en+h_dim_de), self.num_edge_types + 1]))
+
+        dim_features_weights = 4*(h_dim_en + h_dim_de)
+        #self.weights['edge_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_features_weights, h_dim_de]))
+        self.weights['edge_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
+        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types + 1]))
         self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types + 1]).astype(np.float32))
+
 
         feature_dimension = 6 * expanded_h_dim
         # record the total number of features
@@ -651,13 +658,13 @@ class MolGVAE(ChemModel):
 
         #    The tensor array used to collect the cross entropy losses at each step
         edges_pred = tf.TensorArray(dtype=tf.float32, size=v)
-        idx_final, edges_pred, _= \
+        idx_final, edges_pred, _ = \
             tf.while_loop(
                 lambda idx, edges_pred, valences: idx < v, self.generate_edges,
                 (tf.constant(0), edges_pred, valences)
             )
 
-        self.ops['edges_pred'] = tf.transpose(edges_pred.stack(), [1,3,0,2])
+        self.ops['edges_pred'] = tf.transpose(edges_pred.stack(), [1, 3, 0, 2])
         # mask diagonal in order to put all probabilities to 1 in the non existence of the edge
         diag_0 = tf.expand_dims(tf.one_hot(tf.range(v), depth=v, on_value=0.0, off_value=1.0, dtype=tf.float32), 0)
         diag_1 = tf.expand_dims(tf.one_hot(tf.range(v), depth=v, dtype=tf.float32), 0)
@@ -673,42 +680,37 @@ class MolGVAE(ChemModel):
                             axis=1)
         gt = tf.concat([gt, self.placeholders['adjacency_matrix']],
                        axis=1)
-
-        # gt = tf.Print(gt, [gt[0,:,0,0]], message="adj", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [self.ops['edges_pred'][0,:,0,0]], message="pred", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [valences[0,:]], message="valences", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [indexes[0,:]], message = "mol", summarize = 1000)  # TODO: pr
-        # gt = tf.Print(gt, [tf.reduce_sum(gt, 1)[0,0]], message="adj", summarize=1000)  # TODO: pr
-        # gt = tf.Print(gt, [tf.reduce_sum(self.ops['edges_pred'], 1)[0,0]], message="pred", summarize=1000)  # TODO: pr
-
         # final cross entropy losses
-        loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt, axis=[2, 3])
-        # self.ops['cross_entropy_losses'] =- tf.reduce_sum(loss_batchEdge * [0.05, 1, 2, 2], 1)
-        loss = loss_batchEdge[:, 0]
-        n_no_edges = tf.reduce_sum(gt[:, 0, :, :])
-        for i in range(1, self.num_edge_types + 1):
-            sum_tmp = tf.reduce_sum(gt[:, i, :, :])
-            sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_no_edges)
-            weights_temp = n_no_edges / sum_tmp
-            loss += loss_batchEdge[:, i] * weights_temp
-        self.ops['cross_entropy_losses'] = - loss
+        if self.params['loss_normalized_per_batch']:
+            loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt, axis=[2, 3])
+            # self.ops['cross_entropy_losses'] =- tf.reduce_sum(loss_batchEdge * [0.05, 1, 2, 2], 1)
+            loss = loss_batchEdge[:, 0]
+            n_no_edges = tf.reduce_sum(gt[:, 0, :, :])
+            for i in range(1, self.num_edge_types + 1):
+                sum_tmp = tf.reduce_sum(gt[:, i, :, :])
+                sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_no_edges)
+                weights_temp = n_no_edges / sum_tmp
+                loss += loss_batchEdge[:, i] * weights_temp
+            self.ops['cross_entropy_losses'] = - loss
+        else:
+            edge_weights = dataset_info(self.params['dataset'])['loss_edge_weights']
+            loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt, axis=[2, 3])
+            self.ops['cross_entropy_losses'] =- tf.reduce_sum(loss_batchEdge * [0.05, 1, 2, 2], 1)
 
-        # corr_edge = tf.cast(tf.not_equal(self.ops['edge_predictions'],
-        #                                  tf.reduce_sum(self.placeholders['adjacency_matrix'], axis=1)),
-        #                     tf.float32)
+
         corr_type_edge = tf.cast(tf.not_equal(tf.argmax(self.ops['edges_pred'], axis=1),
-                                              tf.argmax(gt, axis=1)),
-                                 tf.float32)
-
+                                                  tf.argmax(gt, axis=1)), tf.float32)
         # self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=-1)
         self.ops['edge_pred_error'] = 0.0
         self.ops['edge_type_pred_error'] = tf.reduce_sum(corr_type_edge, axis=[1, 2])
+
 
     def generate_edges(self, idx, edges_pred, valences):
         v = self.placeholders['num_vertices']
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
         batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
+
         edges_val_req = [i for i in range(self.num_edge_types + 1)]
         edges_val_req = tf.expand_dims(edges_val_req, 0)
         edges_val_req = tf.expand_dims(edges_val_req, 0)
@@ -717,7 +719,12 @@ class MolGVAE(ChemModel):
         latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
         self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
                                                                                 latent_node_state],
-                                                                               axis=2)  # [b, v, h + h]
+                                                                               axis=2)  # [b, v, 2h]
+        # graph features
+        graph_sum = tf.reduce_sum(filtered_z_sampled, axis=1, keep_dims=True)  # [b, 1, 2h]
+        graph_sum = tf.tile(graph_sum, [1, v, 1])
+        graph_prod = tf.reduce_prod(filtered_z_sampled, axis=1, keep_dims=True)  # [b, 1, 2h]
+        graph_prod = tf.tile(graph_prod, [1, v, 1])
 
         # graph features
         graph_sum = tf.reduce_sum(filtered_z_sampled, axis=1, keep_dims=True)  # [b, 1, 2h]
@@ -731,6 +738,7 @@ class MolGVAE(ChemModel):
         node_focus_sum = tf.tile(node_focus, [1, v, 1]) + filtered_z_sampled
         node_focus_prod = tf.tile(node_focus, [1, v, 1]) * filtered_z_sampled  # [b, v, 2h]
         input_features = tf.concat([node_focus_sum, node_focus_prod, graph_sum, graph_prod], axis=-1)
+        dim_input_network = 4 * (h_dim_en + h_dim_de)
 
         # node in focus valences
         node_focus_valences = valences[:, idx]
@@ -746,12 +754,13 @@ class MolGVAE(ChemModel):
         mask = tf.reshape(mask, [-1, self.num_edge_types + 1])
         # mask = tf.Print(mask, [mask[0]], message="mask", summarize=1000)  # TODO: pr
 
-        edge_rep = tf.reshape(input_features, [-1,4*(h_dim_en + h_dim_de)])  # [b * v,4(h_dec + h_enc)]
+        edge_rep = tf.reshape(input_features, [-1, dim_input_network])  # [b * v,4(h_dec + h_enc)]
         # num_edges + 1 -> num edges + no edge
-        final_molecule_logits = tf.matmul(edge_rep, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
+        #final_molecule_logits = self.weights['edge_gen_mlp'](edge_rep)
+        final_molecule_logits = tf.nn.leaky_relu(tf.matmul(edge_rep, self.weights['edge_gen0']) + self.weights['edge_gen_bias0'])  # [b*v, num_edges + 1]
+        final_molecule_logits = tf.matmul(final_molecule_logits, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
         final_molecule = tf.nn.softmax(final_molecule_logits + (mask * LARGE_NUMBER - LARGE_NUMBER))
         final_molecule = tf.reshape(final_molecule, [batch_size, v, -1]) * self.ops['graph_state_mask']
-
 
         edges_pred = edges_pred.write(idx, final_molecule)
         return idx+1, edges_pred, valences
@@ -903,6 +912,7 @@ class MolGVAE(ChemModel):
                 else:
                     incremental_results.append([incremental_adj_mat, distance_to_others, node_sequence, edge_type_masks, 
                                                edge_type_labels, local_stop, edge_masks, edge_labels, overlapped_edge_features])
+
                     # copy the raw_data here 
                     new_raw_data.append(d)
                 if idx % 50 == 0:
@@ -1167,27 +1177,32 @@ class MolGVAE(ChemModel):
         # get feed_dict
         feed_dict=self.get_dynamic_edge_feed_dict(elements, latent_nodes, [sampled_node_symbol_one_hot], max_n_vertices)
         # fetch nn predictions
-        fetch_list = [self.ops['edges_pred']]
-        edges_pred = self.sess.run(fetch_list, feed_dict=feed_dict)
-        edge_selected = edges_pred[0]
-        for row in range(len(edge_selected[0])):
-            p1 = edge_selected[0,:, row,:]
-            p2 = np.array(elements['adj_mat'])[:, row]
-            for col in range(row+1, len(edge_selected[0])):  # only half matrix
-                # choose an edge type
-                if not self.params["use_argmax_bonds"]:
-                    bond=np.random.choice(np.arange(self.num_edge_types),p=edge_selected[0, :, row, col])
-                else:
-                    bond=np.argmax(edge_selected[0, :, row, col])
-                # add the bond
-                if bond != 0:  # because 0 implies the non existing edge
-                    bond = bond -1
-                    new_mol.AddBond(int(row), int(col), number_to_bond[bond])
-
+        fetch_list = [self.ops['edges_pred'], self.ops['edges_type_pred']]
+        edge_probs, edge_type_probs = self.sess.run(fetch_list, feed_dict=feed_dict)
+        edge_probs = edge_probs[0]
+        edge_probs_bin = edge_probs > 0.5
+        edge_type_probs = edge_type_probs[0]
+        for row in range(len(edge_probs[0])):
+            for col in range(row+1, len(edge_probs[0])):  # only half matrix
+                if edge_probs_bin[row, col] == True:
+                    # choose an edge type
+                    if not self.params["use_argmax_bonds"]:
+                        bond=np.random.choice(np.arange(self.num_edge_types),p=edge_type_probs[:, row, col])
+                    else:
+                        bond=np.argmax(edge_type_probs[:, row, col])
+                    # add the bond
+                    if self.params['fix_molecule_validation']:
+                        if min(valences[row], valences[col]) >= bond + 1:
+                            new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+                            valences[row] -= bond + 1
+                            valences[col] -= bond + 1
+                    else:
+                        new_mol.AddBond(int(row), int(col), number_to_bond[bond])
 
         # Remove unconnected node
         remove_extra_nodes(new_mol)
-        new_mol = Chem.MolFromSmiles(Chem.MolToSmiles(new_mol))
+        smiles = Chem.MolToSmiles(new_mol)
+        new_mol=Chem.MolFromSmiles(smiles)
         return new_mol
 
     def gradient_ascent(self, random_normal_states, derivative_z_sampled):        
@@ -1240,8 +1255,10 @@ class MolGVAE(ChemModel):
         else:
             generated_all_similes.append(Chem.MolToSmiles(new_mol))
 
-        # print(Chem.MolToSmiles(best_mol))  # TODO: pr
-        # exit(0)  # TODO: exit
+        if new_mol is None:
+            generated_all_similes.append('None')
+        else:
+            generated_all_similes.append(Chem.MolToSmiles(new_mol))
 
         n_gen_max = self.params['number_of_generation']
         n_gen_cur = len(generated_all_similes)

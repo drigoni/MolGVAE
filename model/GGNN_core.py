@@ -364,7 +364,7 @@ class ChemModel(object):
                    node_pred_error / processed_graphs,
                    edge_pred_error / processed_graphs,
                    edge_type_pred_error / processed_graphs,
-                   reconstruction), end='\r')
+                   reconstruction / processed_graphs), end='\r')
 
             # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
             # exit(0)  # TODO: exit

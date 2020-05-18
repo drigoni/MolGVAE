@@ -51,8 +51,8 @@ def dataset_info(dataset):
                 'bucket_sizes': np.array([28, 31, 33, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 53, 55, 58,
                                           84]),
                 # 'loss_edge_weights': [111623688, 3657738, 3657738, 3657739] this version help only the type of the edge
-                'loss_edge_weights': [3657738, 3657738, 3657738, 3657739]
-                # 'loss_edge_weights': [111623688, 8153922, 2791900, 27394]  #the right one
+                # 'loss_edge_weights': [3657738, 3657738, 3657738, 3657739]
+                'loss_edge_weights': [111623688, 8153922, 2791900, 27394]  #the right one
                }
     else:
         print("Error: The datasets that you could use are QM9 or ZINC, not " + str(dataset))

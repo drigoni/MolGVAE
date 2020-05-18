@@ -239,10 +239,14 @@ class MolGVAE(ChemModel):
 
         # gen edges
         dim_features_weights = 4*(h_dim_en + h_dim_de)
-        self.weights['edge_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        #self.weights['edge_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_features_weights, h_dim_de]))
+        self.weights['edge_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
         self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, 1]))
         self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32))
-        self.weights['edge_type_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        # self.weights['edge_type_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
+        self.weights['edge_type_gen0'] = tf.Variable(glorot_init([dim_features_weights, h_dim_de]))
+        self.weights['edge_type_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
         self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types]))
         self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32))
 
@@ -776,14 +780,16 @@ class MolGVAE(ChemModel):
 
         # edge prediction
         edge_rep = tf.reshape(input_features, [-1, dim_input_network])
-        edge_pred_tmp = self.weights['edge_gen_mlp'](edge_rep)
+        #edge_pred_tmp = self.weights['edge_gen_mlp'](edge_rep)
+        edge_pred_tmp = tf.nn.leaky_relu(tf.matmul(edge_rep, self.weights['edge_gen0']) + self.weights['edge_gen_bias0'])
         edge_pred_tmp = tf.matmul(edge_pred_tmp, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
         edge_pred_tmp = tf.nn.sigmoid(edge_pred_tmp)
         edge_pred_tmp = tf.reshape(edge_pred_tmp, [batch_size, v, 1]) * self.ops['graph_state_mask']
         edge_pred_tmp = tf.squeeze(edge_pred_tmp, axis=-1)
 
         # edge type prediction
-        edge_type_pred_tmp = self.weights['edge_type_gen_mlp'](edge_rep)
+        edge_type_pred_tmp = tf.nn.leaky_relu(tf.matmul(edge_rep, self.weights['edge_type_gen0']) + self.weights['edge_type_gen_bias0'])
+        #edge_type_pred_tmp = self.weights['edge_type_gen_mlp'](edge_rep)
         edge_type_pred_tmp = tf.matmul(edge_type_pred_tmp, self.weights['edge_type_gen']) + self.weights['edge_type_gen_bias']  # [b*v, num_edges + 1]
         edge_type_pred_tmp = tf.nn.softmax(edge_type_pred_tmp + (mask * LARGE_NUMBER - LARGE_NUMBER))
         edge_type_pred_tmp = tf.reshape(edge_type_pred_tmp, [batch_size, v, self.num_edge_types]) * self.ops['graph_state_mask']

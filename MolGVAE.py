@@ -391,8 +391,10 @@ class MolGVAE(ChemModel):
         reshped_last_h = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
         mean = tf.matmul(reshped_last_h, self.weights['mean_weights']) + self.weights['mean_biases']
         logvariance = tf.matmul(reshped_last_h, self.weights['variance_weights']) + self.weights['variance_biases']
-        self.ops['mean'] = mean
-        self.ops['logvariance'] = logvariance
+        self.ops['mean'] = tf.nn.tanh(mean)
+        self.ops['logvariance'] = tf.nn.tanh(logvariance) + 1
+
+        # self.ops['mean'] = tf.Print(self.ops['mean'], [self.ops['mean']], message="mean ", summarize=1000)  # TODO: pr
 
     def sample_with_mean_and_logvariance(self):
         v = self.placeholders['num_vertices']
@@ -1214,26 +1216,55 @@ class MolGVAE(ChemModel):
         fetch_list = [self.ops['edges_pred'], self.ops['edges_type_pred']]
         edge_probs, edge_type_probs = self.sess.run(fetch_list, feed_dict=feed_dict)
         edge_probs = edge_probs[0]
-        edge_probs_bin = edge_probs > 0.5
         edge_type_probs = edge_type_probs[0]
-        for row in range(len(edge_probs[0])):
-            for col in range(row+1, len(edge_probs[0])):  # only half matrix
-                if edge_probs_bin[row, col] == True:
-                    # choose an edge type
-                    if not self.params["use_argmax_bonds"]:
-                        bond=np.random.choice(np.arange(self.num_edge_types),p=edge_type_probs[:, row, col])
-                    else:
-                        bond=np.argmax(edge_type_probs[:, row, col])
-                    # add the bond
-                    if self.params['fix_molecule_validation']:
-                        if min(valences[row], valences[col]) >= bond + 1:
-                            new_mol.AddBond(int(row), int(col), number_to_bond[bond])
-                            valences[row] -= bond + 1
-                            valences[col] -= bond + 1
-                    else:
+
+        # edge_probs_bin =  edge_probs > 0.5
+        # for row in range(len(edge_probs[0])):
+        #     for col in range(row+1, len(edge_probs[0])):  # only half matrix
+        #         if edge_probs_bin[row, col] == True:
+        #             if not self.params["use_argmax_bonds"]:
+        #                 bond=np.random.choice(np.arange(self.num_edge_types),p=edge_type_probs[:, row, col])
+        #             else:
+        #                 bond=np.argmax(edge_type_probs[:, row, col])
+        #             if self.params['fix_molecule_validation']:
+        #                 if min(valences[row], valences[col]) >= bond + 1:
+        #                     new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+        #                     valences[row] -= bond + 1
+        #                     valences[col] -= bond + 1
+        #             else:
+        #                 new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+
+        if not self.params["fix_molecule_validation"]:
+            edge_probs_bin =  edge_probs > 0.5
+            for row in range(len(edge_probs[0])):
+                for col in range(row+1, len(edge_probs[0])):  # only half matrix
+                    if edge_probs_bin[row, col] == True:
+                        if not self.params["use_argmax_bonds"]:
+                            bond=np.random.choice(np.arange(self.num_edge_types),p=edge_type_probs[:, row, col])
+                        else:
+                            bond=np.argmax(edge_type_probs[:, row, col])
                         new_mol.AddBond(int(row), int(col), number_to_bond[bond])
-
-
+        else:
+            edge_probs_dense = []
+            for row in range(real_n_vertices):
+                for col in range(row + 1, real_n_vertices):
+                    dense = (edge_probs[row, col], row, col)
+                    edge_probs_dense.append(dense)
+            edge_probs_dense = sorted(edge_probs_dense, reverse=True)
+            for prob, row, col in edge_probs_dense:
+                if not self.params["use_argmax_bonds"]:
+                    edge = np.random.choice([0, 1], p=[1-prob, prob])
+                    bond = np.random.choice(np.arange(self.num_edge_types), p=edge_type_probs[:, row, col])
+                    condition = edge == 1
+                else:
+                    edge = np.argmax([1-prob, prob])
+                    bond = np.argmax(edge_type_probs[:, row, col])
+                    condition = (edge == 1 and prob >= 0.5)
+                if condition:
+                    if min(valences[row], valences[col]) >= bond + 1:
+                        new_mol.AddBond(int(row), int(col), number_to_bond[bond])
+                        valences[row] -= bond + 1
+                        valences[col] -= bond + 1
 
         # Remove unconnected node
         remove_extra_nodes(new_mol)

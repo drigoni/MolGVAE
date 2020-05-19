@@ -84,8 +84,8 @@ class MolGVAE(ChemModel):
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
                         'num_timesteps': 5,                                    # gnn propagation step
-                        'hidden_size_decoder': 200,                             # decoder hidden size dimension
-                        'hidden_size_encoder': 100,                             # encoder hidden size dimension
+                        'hidden_size_decoder': 300,                             # decoder hidden size dimension
+                        'hidden_size_encoder': 150,                             # encoder hidden size dimension
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
                         'learning_rate': 0.001,
                         'graph_state_dropout_keep_prob': 1,    

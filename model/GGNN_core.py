@@ -305,7 +305,7 @@ class ChemModel(object):
             batch_data[self.placeholders['use_teacher_forcing_nodes']] = teacher_forcing
             batch_data[self.placeholders['z_prior']] = utils.generate_std_normal(self.params['batch_size'],
                                                                                  batch_data[self.placeholders['num_vertices']],
-                                                                                 self.params['hidden_size_encoder'])
+                                                                                 self.params['latent_space_size'])
 
             if is_training:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']

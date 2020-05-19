@@ -84,8 +84,9 @@ class MolGVAE(ChemModel):
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
                         'num_timesteps': 5,                                    # gnn propagation step
-                        'hidden_size_decoder': 200,                             # decoder hidden size dimension
+                        'hidden_size_decoder': 350,                             # decoder hidden size dimension. latent+hist
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
+                        'latent_space_size': 250,                                # latent space size
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
                         'learning_rate': 0.001,
                         'graph_state_dropout_keep_prob': 1,    
@@ -125,6 +126,7 @@ class MolGVAE(ChemModel):
         # params
         h_dim_en = self.params['hidden_size_encoder']
         h_dim_de = self.params['hidden_size_decoder']
+        ls_dim = self.params['latent_space_size']
         expanded_h_dim = h_dim_de + h_dim_en + 1  # 1 for focus bit
         hist_dim = self.histograms['hist_dim']
 
@@ -158,7 +160,7 @@ class MolGVAE(ChemModel):
         # ground truth labels for whether it stops at each iteration step
         self.placeholders['local_stop']=tf.placeholder(tf.float32, [None, None], name='local_stop')  # [b, es]
         # z_prior sampled from standard normal distribution
-        self.placeholders['z_prior']=tf.placeholder(tf.float32, [None, None, h_dim_en], name='z_prior')  # the prior of z sampled from normal distribution
+        self.placeholders['z_prior']=tf.placeholder(tf.float32, [None, None, ls_dim], name='z_prior')  # the prior of z sampled from normal distribution
         # put in front of kl latent loss
         self.placeholders['kl_trade_off_lambda']=tf.placeholder(tf.float32, [], name='kl_trade_off_lambda')  # number
         # overlapped edge features
@@ -219,21 +221,21 @@ class MolGVAE(ChemModel):
 
 
         # Weights final part encoder. They map all nodes in one point in the latent space
-        self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), h_dim_en]), name="mean_weights")
-        self.weights['mean_biases'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32), name="mean_biases")
-        self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), h_dim_en]), name="variance_weights")
-        self.weights['variance_biases'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32), name="variance_biases")
+        self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
+        self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
+        self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
+        self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
 
         # histograms for the first part of the decoder
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
         self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
         self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
         #self.weights['mlp_hist'] = MLP(h_dim_en + 2*hist_dim, h_dim_en, [h_dim_en + 2*hist_dim, h_dim_en], 1)
-        self.weights['latent_space_dec0'] = tf.Variable(glorot_init([h_dim_en + 2*hist_dim, h_dim_en]))
-        self.weights['latent_space_bias_dec0'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32))
+        self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
+        self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
 
         # The weights for generating nodel symbol logits    
-        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([h_dim_de , self.params['num_symbols']]))
+        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim+100 , self.params['num_symbols']]))
         self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
 
 
@@ -269,8 +271,8 @@ class MolGVAE(ChemModel):
         # Weight for overlapped edge feature
         self.weights["overlapped_edge_weight"] = tf.Variable(glorot_init([2, expanded_h_dim]))
         # weights for linear projection on qed prediction input
-        self.weights['qed_weights'] = tf.Variable(glorot_init([h_dim_en, h_dim_en]))
-        self.weights['qed_biases'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32))
+        self.weights['qed_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim]))
+        self.weights['qed_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
         # use node embeddings
         self.weights["node_embedding"] = tf.Variable(glorot_init([self.params["num_symbols"], h_dim_en]))
         
@@ -396,14 +398,14 @@ class MolGVAE(ChemModel):
 
     def sample_with_mean_and_logvariance(self):
         v = self.placeholders['num_vertices']
-        h_dim = self.params['hidden_size_encoder']
+        ls_dim = self.params['latent_space_size']
         # Sample from normal distribution
-        z_prior = tf.reshape(self.placeholders['z_prior'], [-1, h_dim])
+        z_prior = tf.reshape(self.placeholders['z_prior'], [-1, ls_dim])
         # Train: sample from u, Sigma. Generation: sample from 0,1
         z_sampled = tf.cond(self.placeholders['is_generative'], lambda: z_prior, # standard normal
                     lambda: tf.add(self.ops['mean'], tf.multiply(tf.sqrt(tf.exp(self.ops['logvariance'])), z_prior)))
         # filter
-        z_sampled = tf.reshape(z_sampled, [-1, v, h_dim]) * self.ops['graph_state_mask']
+        z_sampled = tf.reshape(z_sampled, [-1, v, ls_dim]) * self.ops['graph_state_mask']
         self.ops['z_sampled'] = z_sampled
 
 
@@ -502,7 +504,7 @@ class MolGVAE(ChemModel):
         exp = tf.expand_dims(conc, 0)   # [1, z + Hdiff + Hcurrent]
 
         # build a node with NN (K)
-        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
+        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         #hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
@@ -550,7 +552,7 @@ class MolGVAE(ChemModel):
         exp = tf.expand_dims(conc, 0)
 
         # build a node with NN (K)
-        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
+        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         # hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
@@ -809,14 +811,14 @@ class MolGVAE(ChemModel):
 
     def construct_loss(self):
         v = self.placeholders['num_vertices']
-        h_dim_en = self.params['hidden_size_encoder']
+        ls_dim = self.params['latent_space_size']
         kl_trade_off_lambda =self.placeholders['kl_trade_off_lambda']
         # Edge loss
         # self.ops["edge_loss"] = tf.reduce_sum(self.ops['cross_entropy_losses'] * self.placeholders['iteration_mask'], axis=1)
         self.ops["edge_loss"] = self.ops['cross_entropy_losses']
         # KL loss
         kl_loss = 1 + self.ops['logvariance'] - tf.square(self.ops['mean']) - tf.exp(self.ops['logvariance'])
-        kl_loss = tf.reshape(kl_loss, [-1, v, h_dim_en]) * self.ops['graph_state_mask']
+        kl_loss = tf.reshape(kl_loss, [-1, v, ls_dim]) * self.ops['graph_state_mask']
         self.ops['kl_loss'] = -0.5 * tf.reduce_sum(kl_loss, [1,2])
         # Node symbol loss
         self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) *
@@ -849,15 +851,15 @@ class MolGVAE(ChemModel):
         for (internal_id, task_id) in enumerate(self.params['task_ids']):
             with tf.variable_scope("out_layer_task%i" % task_id):
                 with tf.variable_scope("regression_gate"):
-                    self.weights['regression_gate_task%i' % task_id] = MLP(h_dim_en, 1, [],
+                    self.weights['regression_gate_task%i' % task_id] = MLP(ls_dim, 1, [],
                                                                            self.placeholders['out_layer_dropout_keep_prob'])
                 with tf.variable_scope("regression"):
-                    self.weights['regression_transform_task%i' % task_id] = MLP(h_dim_en, 1, [],
+                    self.weights['regression_transform_task%i' % task_id] = MLP(ls_dim, 1, [],
                                                                                self.placeholders['out_layer_dropout_keep_prob'])
                 normalized_z_sampled=tf.nn.l2_normalize(self.ops['z_sampled'], 2)
                 self.ops['qed_computed_values']=computed_values = self.gated_regression(normalized_z_sampled,
                                                         self.weights['regression_gate_task%i' % task_id],
-                                                        self.weights['regression_transform_task%i' % task_id], h_dim_en,
+                                                        self.weights['regression_transform_task%i' % task_id], ls_dim,
                                                         self.weights['qed_weights'], self.weights['qed_biases'],
                                                         self.placeholders['num_vertices'], self.placeholders['node_mask'])
                 diff = computed_values - self.placeholders['target_values'][internal_id,:]  # [b]
@@ -1353,7 +1355,7 @@ class MolGVAE(ChemModel):
                 # (this is a result that BFS may not make use of all candidate nodes during generation)
                 maximum_length = self.compensate_node_length(elements, bucket_sizes[bucket])
                 # initial state
-                random_normal_states=generate_std_normal(1, maximum_length, self.params['hidden_size_encoder']) # [1, h]
+                random_normal_states=generate_std_normal(1, maximum_length, self.params['latent_space_size']) # [1, h]
                 random_normal_states = self.optimization_over_prior(random_normal_states, maximum_length, generated_all_similes,
                                                                     elements, count, True)
                 count+=1
@@ -1366,7 +1368,7 @@ class MolGVAE(ChemModel):
         # print("True SMILES", elements['smiles'], "Hist", elements['hist'])  # TODO: pr
         for n_en in range(self.params['reconstruction_en']):
             # take latent from the input encoding or from prior
-            random_normal_states = generate_std_normal(1, num_vertices, self.params['hidden_size_encoder'])  # [1, h]
+            random_normal_states = generate_std_normal(1, num_vertices, self.params['latent_space_size'])  # [1, h]
             # is generative is always false here due to the sampling in the latent space
             feed_dict = self.get_dynamic_mean_feed_dict(elements, num_vertices, random_normal_states, False)  # always false
             # get the latent point according to the encoder distribution

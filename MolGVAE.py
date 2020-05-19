@@ -84,7 +84,7 @@ class MolGVAE(ChemModel):
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
                         'num_timesteps': 5,                                    # gnn propagation step
-                        'hidden_size_decoder': 100,                             # decoder hidden size dimension. latent+hist
+                        'hidden_size_decoder': 200,                             # decoder hidden size dimension. latent+hist
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
                         'latent_space_size': 100,                                # latent space size
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
@@ -234,22 +234,24 @@ class MolGVAE(ChemModel):
         self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
         self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
 
-        # The weights for generating nodel symbol logits    
-        self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([3*ls_dim , ls_dim]))
+        # The weights for generating nodel symbol logits
+        dim_node_features_weights = 3 * ls_dim + h_dim_en
+        self.weights["number_embedding"] = tf.Variable(glorot_init([self.max_num_vertices, h_dim_en]))
+        self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]))
         self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
         self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim , self.params['num_symbols']]))
         self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
 
 
         # gen edges
-        dim_features_weights = 4*(h_dim_en + h_dim_de)
+        dim_edge_features_weights = 4*(h_dim_en + h_dim_de)
         #self.weights['edge_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_features_weights, h_dim_de]))
+        self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]))
         self.weights['edge_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
         self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, 1]))
         self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32))
         # self.weights['edge_type_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_type_gen0'] = tf.Variable(glorot_init([dim_features_weights, h_dim_de]))
+        self.weights['edge_type_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]))
         self.weights['edge_type_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
         self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types]))
         self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32))
@@ -495,9 +497,13 @@ class MolGVAE(ChemModel):
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
         current_sample_z = tf.expand_dims(current_sample_z, 0)
 
+        # new point
+        number_emb = tf.expand_dims(tf.nn.embedding_lookup(self.weights["number_embedding"], idx_atom), axis=0)
+        new_z = tf.concat([current_sample_z, number_emb], axis=1)
+
         graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        input_rp = tf.concat([current_sample_z, graph_sum, graph_prod], axis=-1)
+        input_rp = tf.concat([new_z, graph_sum, graph_prod], axis=-1)
 
         fx_logit = tf.nn.leaky_relu(tf.matmul(input_rp, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
         fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
@@ -508,16 +514,20 @@ class MolGVAE(ChemModel):
                               lambda: fx_prob)
         s_atom = self.sample_atom(probs_value, True)
 
-        return tf.expand_dims(s_atom, 0), tf.squeeze(current_sample_z), fx_prob, updated_hist, sampled_hist
+        return tf.expand_dims(s_atom, 0), tf.squeeze(new_z), fx_prob, updated_hist, sampled_hist
 
 
     def generate_mode_sampling(self, idx_atom, idx_sample, updated_hist,  sampled_hist):
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
         current_sample_z = tf.expand_dims(current_sample_z, 0)
 
+        # new point
+        number_emb = tf.expand_dims(tf.nn.embedding_lookup(self.weights["number_embedding"], idx_atom), axis=0)
+        new_z = tf.concat([current_sample_z, number_emb], axis=1)
+
         graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        input_rp = tf.concat([current_sample_z, graph_sum, graph_prod], axis=-1)
+        input_rp = tf.concat([new_z, graph_sum, graph_prod], axis=-1)
 
         fx_logit = tf.nn.leaky_relu(tf.matmul(input_rp, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
         fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
@@ -525,7 +535,7 @@ class MolGVAE(ChemModel):
 
         s_atom = self.sample_atom(fx_prob, False)
 
-        return tf.expand_dims(s_atom, 0), tf.squeeze(current_sample_z), fx_prob, updated_hist, sampled_hist
+        return tf.expand_dims(s_atom, 0), tf.squeeze(new_z), fx_prob, updated_hist, sampled_hist
 
 
     def mask_mols(self, logits, hist):

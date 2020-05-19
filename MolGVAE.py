@@ -503,7 +503,10 @@ class MolGVAE(ChemModel):
         fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_prob = tf.squeeze(tf.nn.softmax(fx_logit))
 
-        s_atom = self.sample_atom(fx_prob, True)
+        probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
+                              lambda: self.placeholders['node_symbols'][idx_sample][idx_atom],
+                              lambda: fx_prob)
+        s_atom = self.sample_atom(probs_value, True)
 
         return tf.expand_dims(s_atom, 0), tf.squeeze(current_sample_z), fx_prob, updated_hist, sampled_hist
 
@@ -520,7 +523,7 @@ class MolGVAE(ChemModel):
         fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_prob = tf.squeeze(tf.nn.softmax(fx_logit))
 
-        s_atom = self.sample_atom(fx_prob, True)
+        s_atom = self.sample_atom(fx_prob, False)
 
         return tf.expand_dims(s_atom, 0), tf.squeeze(current_sample_z), fx_prob, updated_hist, sampled_hist
 

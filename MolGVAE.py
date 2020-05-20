@@ -526,8 +526,8 @@ class MolGVAE(ChemModel):
         new_z = tf.concat([current_sample_z, number_emb], axis=1)
 
         graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        input_rp = tf.concat([new_z, graph_sum, graph_prod], axis=-1)
+        # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
+        input_rp = tf.concat([new_z, graph_sum], axis=-1)
 
         fx_logit = tf.nn.leaky_relu(tf.matmul(input_rp, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
         fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']

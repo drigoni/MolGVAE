@@ -500,7 +500,7 @@ class MolGVAE(ChemModel):
 
         # new point
         number_emb = tf.expand_dims(tf.nn.embedding_lookup(self.weights["number_embedding"], idx_atom), axis=0)
-        new_z = number_emb + current_sample_z
+        new_z = number_emb * current_sample_z
 
         graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
@@ -524,7 +524,7 @@ class MolGVAE(ChemModel):
 
         # new point
         number_emb = tf.expand_dims(tf.nn.embedding_lookup(self.weights["number_embedding"], idx_atom), axis=0)
-        new_z = number_emb + current_sample_z
+        new_z = number_emb * current_sample_z
 
         graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)

@@ -29,12 +29,15 @@ number_to_bond = {0: Chem.rdchem.BondType.SINGLE, 1: Chem.rdchem.BondType.DOUBLE
 
 def dataset_info(dataset):
     if dataset == 'qm9':
-        return {'atom_types': ["H", "C", "N", "O", "F"],
-                'maximum_valence': {0: 1, 1: 4, 2: 3, 3: 2, 4: 1},
+        return {'atom_types': ["C4(0)", "N3(0)", "N2(-1)", "O2(0)", "F1(0)", "C3(-1)", "N4(1)", "C4(1)", "C3(1)",
+                               "O1(-1)", "N3(1)", "C2(0)", "O3(1)"],
+                'maximum_valence': {0:4, 1: 3, 2: 2, 3: 2, 4: 1, 5: 3, 6: 4, 7: 4, 8: 3,
+                                    9: 1, 10: 3, 11: 2, 12: 3},
                 'hist_dim': 4,
                 'max_valence_value': 9,
                 'max_n_atoms': 30,
-                'number_to_atom': {0: "H", 1: "C", 2: "N", 3: "O", 4: "F"},
+                'number_to_atom': {0: "C", 1: "N", 2: "N", 3: "O", 4: "F", 5: "C", 6: "N", 7: "C", 8: "C",
+                                   9: "O", 10: "N", 11: "C", 12: "O"},
                 'bucket_sizes': np.array(list(range(4, 28, 2)) + [29]),
                 'loss_edge_weights': [6787404, 1882538,  223084,   63896]
                }
@@ -224,19 +227,16 @@ def to_graph(smiles, dataset):
         edges.append((bond.GetBeginAtomIdx(), bond_dict[str(bond.GetBondType())], bond.GetEndAtomIdx()))
         assert bond_dict[str(bond.GetBondType())] != 3
     for atom in mol.GetAtoms():
-        if dataset == 'qm9':
-            nodes.append(onehot(dataset_info(dataset)['atom_types'].index(atom.GetSymbol()), len(dataset_info(dataset)['atom_types'])))
-        elif dataset == 'zinc':  # transform using "<atom_symbol><valence>(<charge>)"  notation
-            symbol = atom.GetSymbol()
-            valence = atom.GetTotalValence()
-            charge = atom.GetFormalCharge()
-            atom_str = "%s%i(%i)" % (symbol, valence, charge)
-            
-            if atom_str not in dataset_info(dataset)['atom_types']:
-                print('Unrecognized atom type %s' % atom_str)
-                return [], []
+        symbol = atom.GetSymbol()
+        valence = atom.GetTotalValence()
+        charge = atom.GetFormalCharge()
+        atom_str = "%s%i(%i)" % (symbol, valence, charge)
 
-            nodes.append(onehot(dataset_info(dataset)['atom_types'].index(atom_str), len(dataset_info(dataset)['atom_types'])))
+        if atom_str not in dataset_info(dataset)['atom_types']:
+            print('Unrecognized atom type %s' % atom_str)
+            return [], []
+
+        nodes.append(onehot(dataset_info(dataset)['atom_types'].index(atom_str), len(dataset_info(dataset)['atom_types'])))
 
     return nodes, edges
 

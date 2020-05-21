@@ -92,9 +92,9 @@ class MolGVAE(ChemModel):
                         'graph_state_dropout_keep_prob': 1,    
                         "compensate_num": 1,                                    # how many atoms to be added during generation
 
-                        'train_file': 'data/molecules_train_%s.json' % dataset,
-                        'valid_file': 'data/molecules_valid_%s.json' % dataset,
-                        'test_file': 'data/molecules_test_%s.json' % dataset,
+                        'train_file': 'data_prova/molecules_train_%s.json' % dataset,
+                        'valid_file': 'data_prova/molecules_valid_%s.json' % dataset,
+                        'test_file': 'data_prova/molecules_test_%s.json' % dataset,
 
                         'try_different_starting': True,
                         "num_different_starting": 6,

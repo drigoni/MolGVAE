@@ -158,7 +158,7 @@ class MolGVAE(ChemModel):
         # ground truth edge labels at each iteration step 
         self.placeholders['edge_labels']=tf.placeholder(tf.float32, [None, None, None], name='edge_labels')  # [b, es, v]
         # ground truth labels for whether it stops at each iteration step
-        self.placeholders['local_stop']git =tf.placeholder(tf.float32, [None, None], name='local_stop')  # [b, es]
+        self.placeholders['local_stop'] =tf.placeholder(tf.float32, [None, None], name='local_stop')  # [b, es]
         # z_prior sampled from standard normal distribution
         self.placeholders['z_prior']=tf.placeholder(tf.float32, [None, None, ls_dim], name='z_prior')  # the prior of z sampled from normal distribution
         # put in front of kl latent loss
@@ -230,7 +230,7 @@ class MolGVAE(ChemModel):
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
         self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
         self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
-        #self.weights['mlp_hist'] = MLP(h_dim_en + 2*hist_dim, h_dim_en, [h_dim_en + 2*hist_dim, h_dim_en], 1)
+        # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
         self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
         self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
 
@@ -239,7 +239,7 @@ class MolGVAE(ChemModel):
         # dim_node_features_weights = 3 * ls_dim + h_dim_en
         self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]))
         self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
-        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim, self.params['num_symbols']]))
+        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([dim_node_features_weights, self.params['num_symbols']]))
         self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
 
 
@@ -505,7 +505,7 @@ class MolGVAE(ChemModel):
         conc = tf.concat([current_sample_z, current_hist_casted, hist_diff_pos], axis=0)
         exp = tf.expand_dims(conc, 0)  # [1, z + Hdiff + Hcurrent]
         # build a node with NN (K)
-        hist_emb = tf.nn.leaky_relu(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
+        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
         # generale points
@@ -513,8 +513,8 @@ class MolGVAE(ChemModel):
         # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
 
-        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        #fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(new_z_concat, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_logit = tf.squeeze(fx_logit)
         if self.params['use_mask']:
             fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
@@ -540,7 +540,7 @@ class MolGVAE(ChemModel):
         conc = tf.concat([current_sample_z, current_hist_casted, hist_diff_pos], axis=0)
         exp = tf.expand_dims(conc, 0)
         # build a node with NN (K)
-        hist_emb = tf.nn.leaky_relu(
+        hist_emb = tf.nn.tanh(
             tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
@@ -549,8 +549,8 @@ class MolGVAE(ChemModel):
         # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
 
-        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        #fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(new_z_concat, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_logit = tf.squeeze(fx_logit)
         if self.params['use_mask']:
             fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)

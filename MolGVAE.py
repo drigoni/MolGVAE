@@ -239,7 +239,7 @@ class MolGVAE(ChemModel):
         # dim_node_features_weights = 3 * ls_dim + h_dim_en
         self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]))
         self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
-        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([dim_node_features_weights, self.params['num_symbols']]))
+        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim, self.params['num_symbols']]))
         self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
 
 
@@ -513,8 +513,8 @@ class MolGVAE(ChemModel):
         # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
 
-        #fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(new_z_concat, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_logit = tf.squeeze(fx_logit)
         if self.params['use_mask']:
             fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
@@ -549,8 +549,8 @@ class MolGVAE(ChemModel):
         # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
         # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
 
-        #fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(new_z_concat, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_logit = tf.squeeze(fx_logit)
         if self.params['use_mask']:
             fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)

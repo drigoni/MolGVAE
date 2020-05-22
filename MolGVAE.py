@@ -84,7 +84,7 @@ class MolGVAE(ChemModel):
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
                         'num_timesteps': 5,                                    # gnn propagation step
-                        'hidden_size_decoder': 100,                             # decoder hidden size dimension. latent+hist
+                        'hidden_size_decoder': 200,                             # decoder hidden size dimension. latent+hist
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
                         'latent_space_size': 100,                                # latent space size
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
@@ -219,29 +219,32 @@ class MolGVAE(ChemModel):
                                                                       [new_h_dim, new_h_dim],
                                                                       self.placeholders['out_layer_dropout_keep_prob'])
 
-
         # Weights final part encoder. They map all nodes in one point in the latent space
-        self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
+        self.weights['mean_weights'] = tf.Variable(
+            glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
         self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
-        self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
-        self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
+        self.weights['variance_weights'] = tf.Variable(
+            glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
+        self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32),
+                                                      name="variance_biases")
 
         # histograms for the first part of the decoder
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
         self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
         self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
-        #self.weights['mlp_hist'] = MLP(h_dim_en + 2*hist_dim, h_dim_en, [h_dim_en + 2*hist_dim, h_dim_en], 1)
-        self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
+        # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
+        self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2 * hist_dim, 100]))
         self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
 
         # The weights for generating nodel symbol logits
-        dim_node_features_weights = 3 * ls_dim
+        dim_node_features_weights = 1 * h_dim_de
         # dim_node_features_weights = 3 * ls_dim + h_dim_en
-        self.weights["number_embedding"] = tf.Variable(glorot_init([self.max_num_vertices, h_dim_en]))
         self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]))
         self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
-        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim , self.params['num_symbols']]))
-        self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
+        self.weights['node_symbol_weights'] = tf.Variable(
+            glorot_init([dim_node_features_weights, self.params['num_symbols']]))
+        self.weights['node_symbol_biases'] = tf.Variable(
+            np.zeros([1, self.params['num_symbols']]).astype(np.float32))
 
 
         # gen edges
@@ -496,47 +499,84 @@ class MolGVAE(ChemModel):
 
     def training_sampling(self, idx_atom, idx_sample, updated_hist, sampled_hist):
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
-        current_sample_z = tf.expand_dims(current_sample_z, 0)
+        current_sample_hist = self.placeholders['hist'][idx_sample]
+        current_sample_hist_casted = tf.cast(current_sample_hist, dtype=tf.float32)
 
-        # new point
-        # number_emb = tf.expand_dims(tf.nn.embedding_lookup(self.weights["number_embedding"], idx_atom), axis=0)
-        # new_z = tf.concat([current_sample_z, number_emb], axis=1)
+        # concatenation with the histogram embedding
+        current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)
+        hist_diff = tf.subtract(current_sample_hist_casted, current_hist_casted)
+        hist_diff_pos = tf.where(hist_diff > 0, hist_diff, tf.zeros_like(hist_diff))
+        conc = tf.concat([current_sample_z, current_hist_casted, hist_diff_pos], axis=0)
+        exp = tf.expand_dims(conc, 0)  # [1, z + Hdiff + Hcurrent]
+        # build a node with NN (K)
+        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
+        new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
-        graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        input_rp = tf.concat([current_sample_z, graph_sum, graph_prod], axis=-1)
+        # generale points
+        # graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
+        # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
+        # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
 
-        fx_logit = tf.nn.leaky_relu(tf.matmul(input_rp, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
-        fx_prob = tf.squeeze(tf.nn.softmax(fx_logit))
+        #fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(new_z_concat, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        fx_logit = tf.squeeze(fx_logit)
+        if self.params['use_mask']:
+            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
+        fx_prob = tf.nn.softmax(fx_logit)
 
         probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
                               lambda: self.placeholders['node_symbols'][idx_sample][idx_atom],
                               lambda: fx_prob)
         s_atom = self.sample_atom(probs_value, True)
+        current_new_hist = self.update_hist(updated_hist, s_atom)
 
-        return tf.expand_dims(s_atom, 0), tf.squeeze(current_sample_z), fx_prob, updated_hist, sampled_hist
+        return tf.expand_dims(s_atom, 0), tf.squeeze(new_z_concat), fx_prob, current_new_hist, sampled_hist
 
 
     def generate_mode_sampling(self, idx_atom, idx_sample, updated_hist,  sampled_hist):
+        hist_dim = self.histograms['hist_dim']
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
-        current_sample_z = tf.expand_dims(current_sample_z, 0)
 
-        # new point
-        # number_emb = tf.expand_dims(tf.nn.embedding_lookup(self.weights["number_embedding"], idx_atom), axis=0)
-        # new_z = tf.concat([current_sample_z, number_emb], axis=1)
+        current_sample_hist_casted = tf.cast(sampled_hist, dtype=tf.float32)
+        current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)
+        hist_diff = tf.subtract(current_sample_hist_casted, current_hist_casted)
+        hist_diff_pos = tf.where(hist_diff > 0, hist_diff, tf.zeros_like(hist_diff))
+        conc = tf.concat([current_sample_z, current_hist_casted, hist_diff_pos], axis=0)
+        exp = tf.expand_dims(conc, 0)
+        # build a node with NN (K)
+        hist_emb = tf.nn.tanh(
+            tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
+        new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
-        graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        input_rp = tf.concat([current_sample_z, graph_sum, graph_prod], axis=-1)
+        # generale points
+        # graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
+        # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
+        # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
 
-        fx_logit = tf.nn.leaky_relu(tf.matmul(input_rp, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
-        fx_prob = tf.squeeze(tf.nn.softmax(fx_logit))
-
+        #fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(new_z_concat, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        fx_logit = tf.squeeze(fx_logit)
+        if self.params['use_mask']:
+            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
+        fx_prob = tf.nn.softmax(fx_logit)
         s_atom = self.sample_atom(fx_prob, False)
+        new_updated_hist = self.update_hist(updated_hist, s_atom)
 
-        return tf.expand_dims(s_atom, 0), tf.squeeze(current_sample_z), fx_prob, updated_hist, sampled_hist
+        # sampling one compatible histogram with the current new histogram
+        reshape = tf.reshape(new_updated_hist,
+                             (-1, hist_dim))  # reshape the dimension from [n_valences] to [1, n_valences]
+        m1 = self.placeholders['histograms'] >= reshape  # vector of 0 and 1
+
+        m2 = tf.reduce_sum(tf.cast(m1, dtype=tf.int32), axis=1)  # [b]
+        m3 = tf.equal(m2, tf.constant(hist_dim))  # [b]
+        m4 = tf.cast(m3, dtype=tf.int32)  # [b]
+        m5 = tf.multiply(self.placeholders['n_histograms'], m4)  # [b]
+        mSomma = tf.reduce_sum(m5)
+        new_sampled_hist = tf.cond(tf.equal(tf.constant(0), mSomma),
+                                   lambda: self.case_random_sampling(),
+                                   lambda: self.case_sampling(m5, mSomma))
+
+        return tf.expand_dims(s_atom, 0), tf.squeeze(new_z_concat), fx_prob, new_updated_hist, new_sampled_hist
 
 
     def mask_mols(self, logits, hist):

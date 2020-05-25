@@ -84,7 +84,7 @@ class MolGVAE(ChemModel):
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
                         'num_timesteps': 5,                                    # gnn propagation step
-                        'hidden_size_decoder': 200,                             # decoder hidden size dimension. latent+hist
+                        'hidden_size_decoder': 400,                             # decoder hidden size dimension. latent+hist
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
                         'latent_space_size': 100,                                # latent space size
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
@@ -226,12 +226,14 @@ class MolGVAE(ChemModel):
         self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
         self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
 
+        self.weights['latent_space_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim*3]))
+        self.weights['latent_space_bias'] = tf.Variable(np.zeros([1, ls_dim*3]).astype(np.float32))
+
         # histograms for the first part of the decoder
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
         self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
         self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
-        # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
-        self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
+        self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim*3 + 2*hist_dim, 100]))
         self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
 
         # The weights for generating nodel symbol logits
@@ -498,6 +500,11 @@ class MolGVAE(ChemModel):
         current_sample_hist = self.placeholders['hist'][idx_sample]
         current_sample_hist_casted = tf.cast(current_sample_hist, dtype=tf.float32)
 
+        current_sample_z = tf.expand_dims(current_sample_z, 0)
+        current_sample_z = tf.nn.leaky_relu(
+            tf.matmul(current_sample_z, self.weights['latent_space_weights']) + self.weights['latent_space_bias'])
+        current_sample_z = tf.squeeze(current_sample_z, 0)
+
         # concatenation with the histogram embedding
         current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)
         hist_diff = tf.subtract(current_sample_hist_casted, current_hist_casted)
@@ -532,6 +539,11 @@ class MolGVAE(ChemModel):
     def generate_mode_sampling(self, idx_atom, idx_sample, updated_hist,  sampled_hist):
         hist_dim = self.histograms['hist_dim']
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
+
+        current_sample_z = tf.expand_dims(current_sample_z, 0)
+        current_sample_z = tf.nn.leaky_relu(
+            tf.matmul(current_sample_z, self.weights['latent_space_weights']) + self.weights['latent_space_bias'])
+        current_sample_z = tf.squeeze(current_sample_z, 0)
 
         current_sample_hist_casted = tf.cast(sampled_hist, dtype=tf.float32)
         current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)

@@ -303,11 +303,12 @@ class ThreadedIterator:
 
 # Implements multilayer perceptron
 class MLP(object):
-    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob):
+    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu):
         self.in_size = in_size
         self.out_size = out_size
         self.hid_sizes = hid_sizes
         self.dropout_keep_prob = dropout_keep_prob
+        self.activation_function = activation_function
         self.params = self.make_network_params()
 
     def make_network_params(self):
@@ -332,7 +333,7 @@ class MLP(object):
         acts = inputs
         for W, b in zip(self.params["weights"], self.params["biases"]):
             hid = tf.matmul(acts, tf.nn.dropout(W, self.dropout_keep_prob)) + b
-            acts = tf.nn.relu(hid)
+            acts = self.activation_function(hid)
         last_hidden = hid
         return last_hidden
 

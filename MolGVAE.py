@@ -217,7 +217,8 @@ class MolGVAE(ChemModel):
                         self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
                                                                       new_h_dim,
                                                                       [new_h_dim, new_h_dim],
-                                                                      self.placeholders['out_layer_dropout_keep_prob'])
+                                                                      self.placeholders['out_layer_dropout_keep_prob'],
+                                                                          activation_function=tf.nn.leaky_relu)
 
 
         # Weights final part encoder. They map all nodes in one point in the latent space

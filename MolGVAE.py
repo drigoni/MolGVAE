@@ -217,17 +217,30 @@ class MolGVAE(ChemModel):
                         self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
                                                                       new_h_dim,
                                                                       [new_h_dim, new_h_dim],
-                                                                      self.placeholders['out_layer_dropout_keep_prob'])
+                                                                      self.placeholders['out_layer_dropout_keep_prob'],
+                                                                      activation_function=tf.nn.leaky_relu)
 
 
         # Weights final part encoder. They map all nodes in one point in the latent space
+        self.weights['mlp_mean'] = MLP(h_dim_en * (self.params['num_timesteps'] + 1),
+                                       ls_dim,
+                                       [ls_dim],
+                                       1.0, activation_function=tf.nn.leaky_relu)
+        self.weights['mlp_variance'] = MLP(h_dim_en * (self.params['num_timesteps'] + 1),
+                                       ls_dim,
+                                       [ls_dim],
+                                       1.0, activation_function=tf.nn.leaky_relu)
         self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
         self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
         self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
         self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
 
-        self.weights['latent_space_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim*3]))
-        self.weights['latent_space_bias'] = tf.Variable(np.zeros([1, ls_dim*3]).astype(np.float32))
+        self.weights['mlp_latent_space'] = MLP(ls_dim,
+                                                ls_dim*3,
+                                                [ls_dim*3],
+                                                1.0, activation_function=tf.nn.leaky_relu)
+        # self.weights['latent_space_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim*3]))
+        # self.weights['latent_space_bias'] = tf.Variable(np.zeros([1, ls_dim*3]).astype(np.float32))
 
         # histograms for the first part of the decoder
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
@@ -397,8 +410,12 @@ class MolGVAE(ChemModel):
     def compute_mean_and_logvariance(self):
         h_dim = self.params['hidden_size_encoder']
         reshped_last_h = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
-        mean = tf.matmul(reshped_last_h, self.weights['mean_weights']) + self.weights['mean_biases']
-        logvariance = tf.matmul(reshped_last_h, self.weights['variance_weights']) + self.weights['variance_biases']
+        # mean = tf.matmul(reshped_last_h, self.weights['mean_weights']) + self.weights['mean_biases']
+        # logvariance = tf.matmul(reshped_last_h, self.weights['variance_weights']) + self.weights['variance_biases']
+
+        mean = self.weights['mlp_mean'](reshped_last_h)
+        logvariance = self.weights['mlp_mean'](reshped_last_h)
+
         self.ops['mean'] = mean
         self.ops['logvariance'] = logvariance
 
@@ -501,8 +518,7 @@ class MolGVAE(ChemModel):
         current_sample_hist_casted = tf.cast(current_sample_hist, dtype=tf.float32)
 
         current_sample_z = tf.expand_dims(current_sample_z, 0)
-        current_sample_z = tf.nn.leaky_relu(
-            tf.matmul(current_sample_z, self.weights['latent_space_weights']) + self.weights['latent_space_bias'])
+        current_sample_z = self.weights['mlp_latent_space'](current_sample_z)
         current_sample_z = tf.squeeze(current_sample_z, 0)
 
         # concatenation with the histogram embedding
@@ -541,8 +557,7 @@ class MolGVAE(ChemModel):
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
 
         current_sample_z = tf.expand_dims(current_sample_z, 0)
-        current_sample_z = tf.nn.leaky_relu(
-            tf.matmul(current_sample_z, self.weights['latent_space_weights']) + self.weights['latent_space_bias'])
+        current_sample_z = self.weights['mlp_latent_space'](current_sample_z)
         current_sample_z = tf.squeeze(current_sample_z, 0)
 
         current_sample_hist_casted = tf.cast(sampled_hist, dtype=tf.float32)

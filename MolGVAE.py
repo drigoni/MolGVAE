@@ -84,9 +84,9 @@ class MolGVAE(ChemModel):
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
                         'num_timesteps': 5,                                    # gnn propagation step
-                        'hidden_size_decoder': 400,                             # decoder hidden size dimension. latent+hist
+                        'hidden_size_decoder': 700,                             # decoder hidden size dimension. latent+hist
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
-                        'latent_space_size': 100,                                # latent space size
+                        'latent_space_size': 200,                                # latent space size
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
                         'learning_rate': 0.001,
                         'graph_state_dropout_keep_prob': 1,    
@@ -224,11 +224,11 @@ class MolGVAE(ChemModel):
         # Weights final part encoder. They map all nodes in one point in the latent space
         self.weights['mlp_mean'] = MLP(h_dim_en * (self.params['num_timesteps'] + 1),
                                        ls_dim,
-                                       [ls_dim],
+                                       [h_dim_en * (self.params['num_timesteps'] + 1)],
                                        1.0, activation_function=tf.nn.leaky_relu)
         self.weights['mlp_variance'] = MLP(h_dim_en * (self.params['num_timesteps'] + 1),
                                        ls_dim,
-                                       [ls_dim],
+                                       [h_dim_en * (self.params['num_timesteps'] + 1)],
                                        1.0, activation_function=tf.nn.leaky_relu)
         self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
         self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
@@ -236,8 +236,8 @@ class MolGVAE(ChemModel):
         self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
 
         self.weights['mlp_latent_space'] = MLP(ls_dim,
-                                                ls_dim*3,
-                                                [ls_dim*3],
+                                                h_dim_en * (self.params['num_timesteps'] + 1),
+                                                [h_dim_en * (self.params['num_timesteps'] + 1)],
                                                 1.0, activation_function=tf.nn.leaky_relu)
         # self.weights['latent_space_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim*3]))
         # self.weights['latent_space_bias'] = tf.Variable(np.zeros([1, ls_dim*3]).astype(np.float32))
@@ -832,6 +832,7 @@ class MolGVAE(ChemModel):
     def construct_loss(self):
         v = self.placeholders['num_vertices']
         ls_dim = self.params['latent_space_size']
+        h_dim = self.params['hidden_size_encoder']
         kl_trade_off_lambda =self.placeholders['kl_trade_off_lambda']
         # Edge loss
         # self.ops["edge_loss"] = tf.reduce_sum(self.ops['cross_entropy_losses'] * self.placeholders['iteration_mask'], axis=1)
@@ -854,6 +855,10 @@ class MolGVAE(ChemModel):
             # second version
             self.ops['node_symbol_loss'] = 1 - self.IoU(self.ops['node_symbol_prob'], self.placeholders['node_symbols'])
 
+        reshaped_z = tf.reshape(self.ops['z_sampled'], [-1, ls_dim])
+        mpl_z = self.weights['mlp_latent_space'](reshaped_z)
+        reshaped_z_rap = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
+        self.ops['z_loss'] = tf.nn.l2_loss(reshaped_z_rap - mpl_z)
 
 
         latent_node_symbol = tf.cast(tf.not_equal(tf.argmax(self.ops['latent_node_symbols'], axis=-1),
@@ -905,7 +910,8 @@ class MolGVAE(ChemModel):
         self.ops['mean_total_qed_loss'] = self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
         return tf.reduce_mean(self.ops["edge_loss"] + self.ops['node_symbol_loss'] + \
                               kl_trade_off_lambda *self.ops['kl_loss'])\
-                              + self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
+                              + self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss'] + \
+               kl_trade_off_lambda/10*self.ops['z_loss']
 
     def IoU(self, y_pred, y_true):
         # van Beers, Floris, et al. "Deep Neural Networks with Intersection over Union Loss for Binary Image Segmentation.

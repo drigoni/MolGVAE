@@ -32,6 +32,8 @@ def readStr_qm9():
         line = line.strip()
         L.append(line)
     f.close()
+    np.random.seed(1)
+    np.random.shuffle(L)
     return L
 
 
@@ -46,7 +48,6 @@ def read_zinc():
 
 
 def train_valid_split(dataset):
-    np.random.shuffle(dataset)
     n_mol_out = 0
     n_test = 5000
     test_idx = np.arange(0, n_test)
@@ -132,7 +133,7 @@ def preprocess(raw_data, dataset):
         #     with open('molecules_%s_%s_10000.json' % (section, dataset), 'w') as f:
         #         json.dump([processed_data[section][i] for i in idx], f)
         #     exit(0)
-        #
+
         with open('molecules_%s_%s.json' % (section, dataset), 'w') as f:
             json.dump(processed_data[section], f)
 

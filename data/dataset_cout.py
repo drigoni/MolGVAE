@@ -20,6 +20,9 @@ import numpy as np
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import utils
 from collections import defaultdict
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 # get current directory in order to work with full path and not dynamic
 current_dir = os.path.dirname(os.path.realpath(__file__))
@@ -57,14 +60,24 @@ def load_data(file_name, number):
     return data
 
 
-def count_molecules(data):
+def count_molecules(data, dataset):
+    if str.lower(dataset) == 'qm9':
+        limit = 12
+    else:
+        limit = 40
     # groups molecules based on the number of atoms
-    g_mol = [[] for i in range(40)]
+    g_mol = [[] for i in range(limit)]
     for n, s in enumerate(data):
         m =  Chem.MolFromSmiles(s['smiles'])
         atoms = m.GetAtoms()
         g_mol[len(atoms)].append(n)
     print('Grouped molecules: ', [(i, len(mols)) for i, mols in enumerate(g_mol)])
+    n_g_mol = [len(mols) for mols in g_mol]
+    sns.scatterplot(range(len(n_g_mol)), n_g_mol)
+    plt.title("Number of molecules")
+    plt.xlabel("Molecules by number of atoms")
+    sns.despine(offset=True)
+    plt.show()
 
 def count_number_atoms(data, dataset):
     g_mol = {s:0 for s in utils.dataset_info(dataset)['atom_types']}
@@ -125,7 +138,7 @@ if __name__ == "__main__":
 
     data = load_data(file, filter)
 
-    count_molecules(data)
+    count_molecules(data, dataset)
     count_number_atoms(data, dataset)
     count_edges(data)
 

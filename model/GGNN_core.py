@@ -136,7 +136,6 @@ class ChemModel(object):
             self.max_num_vertices = max(self.max_num_vertices, max([v for e in g['graph'] for v in [e[0], e[2]]]))
 
         self.num_edge_types = max(self.num_edge_types, num_fwd_edge_types * (1 if self.params['tie_fwd_bkwd'] else 2))
-
         self.annotation_size = max(self.annotation_size, len(data[0]["node_features"][0]))
 
         return data, self.process_raw_graphs(data, is_training_data, file_name)
@@ -309,12 +308,12 @@ class ChemModel(object):
 
             if is_training:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']
-                fetch_list = [self.ops['loss'], self.ops['train_step'], 
-                              self.ops["edge_loss"], self.ops['kl_loss'], 
+                fetch_list = [self.ops['loss'], self.ops['train_step'],
+                              self.ops["edge_loss"], self.ops['kl_loss'],
                               self.ops['node_symbol_prob'], self.placeholders['node_symbols'],
                               self.ops['qed_computed_values'], self.placeholders['target_values'], self.ops['total_qed_loss'],
                               self.ops['mean'], self.ops['logvariance'],
-                              self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'], 
+                              self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'],
                               self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
                               self.ops['reconstruction']]

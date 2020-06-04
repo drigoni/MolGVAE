@@ -206,6 +206,46 @@ def need_kekulize(mol):
     return False
 
 
+def calc_node_mask(hist, dataset):
+    mol_valence_list = []
+    for key in dataset_info(dataset)['maximum_valence'].keys():
+        mol_valence_list.append([dataset_info(dataset)['maximum_valence'][key]])
+    H_b = np.greater(hist, 0)  # obtaining a vector of only 1 and 0
+    idx = np.where(np.less_equal(H_b, 0))  # obtaining al the indexes with 0-values in the hist
+    valences = np.add(idx, 1)  # valences to avoid
+    equals = np.not_equal(mol_valence_list, valences)  # broadcasting.
+    mask_bool = np.all(equals, 1)
+    mask = mask_bool.astype(int)
+    return mask
+
+
+def incr_node(mol, dataset):
+    hist_dim = dataset_info(dataset)['hist_dim']
+    mol_valences = dataset_info(dataset)['maximum_valence']
+    incr_hist = []
+    incr_diff_hist = []
+    incr_node_mask = []
+    # calc increment hist
+    c_hist = [0 for i in range(hist_dim)]
+    incr_hist.append(np.copy(c_hist).tolist())
+    incr_diff_hist.append(mol['hist'])
+    for n in mol['node_features']:
+        idx_mol = np.argmax(n)
+        val = mol_valences[idx_mol]
+        val_idx = val - 1
+        c_hist[val_idx] += 1
+        incr_hist.append(np.copy(c_hist).tolist())
+
+        # calc diff hist
+        diff_hist = np.subtract(mol['hist'], c_hist)
+        diff_hist = np.where(diff_hist > 0, diff_hist, np.zeros_like(diff_hist)).tolist()
+        incr_diff_hist.append(diff_hist)
+
+        # calc mask for the nodes_prob
+        incr_node_mask.append(calc_node_mask(diff_hist, dataset))
+    return incr_hist[:-1], incr_diff_hist[:-1], incr_node_mask
+
+
 def to_graph(smiles, dataset):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:

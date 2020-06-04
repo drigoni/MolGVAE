@@ -139,32 +139,19 @@ class MolGVAE(ChemModel):
         self.placeholders['adjacency_matrix'] = tf.placeholder(tf.float32, [None, self.num_edge_types, None, None], name="adjacency_matrix")  # [b, e, v, v]
         # labels for node symbol prediction
         self.placeholders['node_symbols'] = tf.placeholder(tf.float32, [None, None, self.params['num_symbols']])  # [b, v, edge_type]
-        # mask out cross entropies in decoder
-        self.placeholders['iteration_mask']=tf.placeholder(tf.float32, [None, None]) # [b, es]
-        # adj matrices used in decoder
-        self.placeholders['incre_adj_mat']=tf.placeholder(tf.float32, [None, None, self.num_edge_types, None, None], name='incre_adj_mat')  # [b, es, e, v, v]
-        # distance 
-        self.placeholders['distance_to_others']=tf.placeholder(tf.int32, [None, None, None], name='distance_to_others')  # [b, es,v]
-        # maximum iteration number of this batch
-        self.placeholders['max_iteration_num']=tf.placeholder(tf.int32, [], name='max_iteration_num')  # number
-        # node number in focus at each iteration step
-        self.placeholders['node_sequence']=tf.placeholder(tf.float32, [None, None, None], name='node_sequence')  # [b, es, v]
-        # mask out invalid edge types at each iteration step 
-        self.placeholders['edge_type_masks']=tf.placeholder(tf.float32, [None, None, self.num_edge_types, None], name='edge_type_masks')  # [b, es, e, v]
-        # ground truth edge type labels at each iteration step 
-        self.placeholders['edge_type_labels']=tf.placeholder(tf.float32, [None, None, self.num_edge_types, None], name='edge_type_labels')  # [b, es, e, v]
-        # mask out invalid edge at each iteration step 
-        self.placeholders['edge_masks']=tf.placeholder(tf.float32, [None, None, None], name='edge_masks')  # [b, es, v]
-        # ground truth edge labels at each iteration step 
-        self.placeholders['edge_labels']=tf.placeholder(tf.float32, [None, None, None], name='edge_labels')  # [b, es, v]
-        # ground truth labels for whether it stops at each iteration step
-        self.placeholders['local_stop'] =tf.placeholder(tf.float32, [None, None], name='local_stop')  # [b, es]
         # z_prior sampled from standard normal distribution
         self.placeholders['z_prior']=tf.placeholder(tf.float32, [None, None, ls_dim], name='z_prior')  # the prior of z sampled from normal distribution
         # put in front of kl latent loss
         self.placeholders['kl_trade_off_lambda']=tf.placeholder(tf.float32, [], name='kl_trade_off_lambda')  # number
-        # overlapped edge features
-        self.placeholders['overlapped_edge_features']=tf.placeholder(tf.int32, [None, None, None], name='overlapped_edge_features') # [b, es, v]
+
+        # histograms for the first part of the decoder
+        self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
+        self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
+        self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
+        self.placeholders['incr_hist'] = tf.placeholder(tf.float32, (None, None, hist_dim), name="incr_hist")
+        self.placeholders['incr_diff_hist'] = tf.placeholder(tf.float32, (None, None, hist_dim), name="incr_diff_hist")
+        self.placeholders['incr_node_mask'] = tf.placeholder(tf.float32, (None, None, self.params['num_symbols']), name="incr_node_mask")
+
 
         # weights for encoder and decoder GNN.
         if self.params['use_graph']:
@@ -227,10 +214,6 @@ class MolGVAE(ChemModel):
         self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
         self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
 
-        # histograms for the first part of the decoder
-        self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
-        self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
-        self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
         # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
         self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
         self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
@@ -418,6 +401,62 @@ class MolGVAE(ChemModel):
     Construct the nodes representations
     """
     def construct_nodes(self):
+        is_generative = self.placeholders['is_generative']
+        initial_nodes_decoder, node_symbol_prob, sampled_atoms = tf.cond(is_generative,
+                                                                         lambda: self.train_procedure(),
+                                                                         lambda: self.construct_nodes2(),
+                                                                         name='train_gen_condition')
+
+        self.ops['initial_nodes_decoder'] = initial_nodes_decoder * self.ops['graph_state_mask']
+        self.ops['node_symbol_prob'] = node_symbol_prob * self.ops['graph_state_mask']
+        self.ops['sampled_atoms'] = sampled_atoms * self.placeholders['node_mask']
+
+        # calc one hot repr. for type of atom
+        self.ops['latent_node_symbols'] = tf.one_hot(tf.cast(self.ops['sampled_atoms'], tf.int32),
+                                                     self.params['num_symbols'],
+                                                     name='latent_node_symbols') * self.ops['graph_state_mask']
+
+
+    def train_procedure(self):
+        h_dim_de = self.params['hidden_size_decoder']
+        latent_space_dim = self.params['latent_space_size']
+        hist_dim = self.histograms['hist_dim']
+        num_symbols = self.params['num_symbols']
+        batch_size = tf.shape(self.ops['z_sampled'])[0]
+        v = self.placeholders['num_vertices']  # bucket size dimension, not all time the real one.
+
+        # calc emb hist
+        input_z_hist = tf.concat(
+            [self.ops['z_sampled'], self.placeholders['incr_hist'], self.placeholders['incr_diff_hist']], -1)
+        z_input = tf.reshape(input_z_hist, [-1, latent_space_dim + 2 * hist_dim])
+        hist_emb = tf.nn.tanh(tf.matmul(z_input, self.weights['histogram_weights']) + self.weights['histogram_bias'])
+        float_z_sampled = tf.reshape(self.ops['z_sampled'], [-1, latent_space_dim])
+        conc_z_hist = tf.concat([float_z_sampled, hist_emb], -1)
+        initial_nodes_decoder = tf.reshape(conc_z_hist, [batch_size, v, h_dim_de])
+
+        # calc prob with or without mask
+        atom_logits = tf.nn.leaky_relu(
+            tf.matmul(conc_z_hist, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        atom_logits = tf.matmul(atom_logits, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        if self.params['use_mask']:
+            flat_incr_node_mask = tf.reshape(self.placeholders['incr_node_mask'], [-1, num_symbols])
+            atom_logits = tf.where(tf.reduce_sum(flat_incr_node_mask, 1) > 0,
+                                   atom_logits + (atom_logits * LARGE_NUMBER - LARGE_NUMBER),
+                                   atom_logits)
+        atom_prob = tf.nn.softmax(atom_logits)
+        node_symbol_prob = tf.reshape(atom_prob, [batch_size, v, num_symbols])
+
+        # calc type of atom with or without TF
+        sampled_atoms = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
+                                lambda: self.placeholders['node_symbols'],
+                                lambda: node_symbol_prob)
+        sampled_atoms_casted = tf.cast(tf.argmax(sampled_atoms, axis=-1, output_type=tf.int32), tf.float32)
+        return initial_nodes_decoder, node_symbol_prob, sampled_atoms_casted
+
+    """
+    Construct the nodes representations
+    """
+    def construct_nodes2(self):
         h_dim_de = self.params['hidden_size_decoder']
         num_symbols = self.params['num_symbols']
         batch_size = tf.shape(self.ops['z_sampled'])[0]
@@ -435,26 +474,16 @@ class MolGVAE(ChemModel):
             parallel_iterations=self.params['batch_size']
         )
 
-        atoms = atoms.stack() * tf.cast(self.ops['graph_state_mask'], tf.int32)
-        init_h_states = init_atoms.stack() * self.ops['graph_state_mask']
-        nodes_type_probs = fx_prob.stack() * self.ops['graph_state_mask']
+        init_h_states = init_atoms.stack()
+        nodes_type_probs = fx_prob.stack()
+        atoms = atoms.stack()
 
-        # save the embedding representations of the atoms
-        self.ops['initial_nodes_decoder'] = init_h_states
-        self.ops['node_symbol_prob'] = nodes_type_probs
-        self.ops['sampled_atoms'] = atoms
-
-        self.ops['latent_node_symbols'] = tf.one_hot(tf.squeeze(self.ops['sampled_atoms'], axis=-1), self.params['num_symbols'],
-                                                     name='latent_node_symbols') * self.ops['graph_state_mask']
-
-        #self.ops['latent_node_symbols'] = tf.Print(self.ops['latent_node_symbols'],
-        #                                           [tf.shape(self.ops['latent_node_symbols']), self.ops['latent_node_symbols']],
-        #                                           message="latent_node_symbols ", summarize=1000)  # TODO: pr
+        return init_h_states, nodes_type_probs, tf.cast(tf.squeeze(atoms, -1), tf.float32)
 
     """
     Cycles each atom in order to generate the nodes
     """
-    def for_each_molecula(self, idx_sample, atoms,  init_vertices_all, fx_prob_all):
+    def for_each_molecula(self, idx_sample, atoms, init_vertices_all, fx_prob_all):
         h_dim_de = self.params['hidden_size_decoder']
         num_symbols = self.params['num_symbols']
         v = self.placeholders['num_vertices']  # bucket size dimension, not all time the real one.
@@ -482,55 +511,6 @@ class MolGVAE(ChemModel):
     For each node (atoms) calculates histograms and new hidden representations
     """
     def generate_nodes(self, idx_atom, atoms, init_vertices, fx_prob, idx_sample, updated_hist, sampled_hist):
-        is_generative = self.placeholders['is_generative']
-
-        s_atom, init_v, fx, new_updated_hist, new_sampled_hist = tf.cond(is_generative,
-                        lambda: self.generate_mode_sampling(idx_atom, idx_sample, updated_hist, sampled_hist),
-                        lambda: self.training_sampling(idx_atom, idx_sample, updated_hist, sampled_hist))
-
-        atoms = atoms.write(idx_atom, s_atom)
-        init_vertices = init_vertices.write(idx_atom, init_v)
-        fx_prob = fx_prob.write(idx_atom, fx)
-        return idx_atom + 1, atoms, init_vertices, fx_prob, idx_sample, new_updated_hist, new_sampled_hist
-
-
-    def training_sampling(self, idx_atom, idx_sample, updated_hist, sampled_hist):
-        current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
-        current_sample_hist = self.placeholders['hist'][idx_sample]
-        current_sample_hist_casted = tf.cast(current_sample_hist, dtype=tf.float32)
-
-        # concatenation with the histogram embedding
-        current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)
-        hist_diff = tf.subtract(current_sample_hist_casted, current_hist_casted)
-        hist_diff_pos = tf.where(hist_diff > 0, hist_diff, tf.zeros_like(hist_diff))
-        conc = tf.concat([current_sample_z, current_hist_casted, hist_diff_pos], axis=0)
-        exp = tf.expand_dims(conc, 0)  # [1, z + Hdiff + Hcurrent]
-        # build a node with NN (K)
-        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
-        new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
-
-        # generale points
-        # graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
-
-        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
-        fx_logit = tf.squeeze(fx_logit)
-        if self.params['use_mask']:
-            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
-        fx_prob = tf.nn.softmax(fx_logit)
-
-        probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
-                              lambda: self.placeholders['node_symbols'][idx_sample][idx_atom],
-                              lambda: fx_prob)
-        s_atom = self.sample_atom(probs_value, True)
-        current_new_hist = self.update_hist(updated_hist, s_atom)
-
-        return tf.expand_dims(s_atom, 0), tf.squeeze(new_z_concat), fx_prob, current_new_hist, sampled_hist
-
-
-    def generate_mode_sampling(self, idx_atom, idx_sample, updated_hist,  sampled_hist):
         hist_dim = self.histograms['hist_dim']
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
 
@@ -545,18 +525,14 @@ class MolGVAE(ChemModel):
             tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
-        # generale points
-        # graph_sum = tf.reduce_sum(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        # graph_prod = tf.reduce_prod(self.ops['z_sampled'][idx_sample], axis=0, keepdims=True)
-        # new_z_concat = tf.concat([new_z_concat, graph_sum, graph_prod], axis=-1)
-
-        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.nn.leaky_relu(
+            tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
         fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
         fx_logit = tf.squeeze(fx_logit)
         if self.params['use_mask']:
             fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
-        fx_prob = tf.nn.softmax(fx_logit)
-        s_atom = self.sample_atom(fx_prob, False)
+        node_probs = tf.nn.softmax(fx_logit)
+        s_atom = self.sample_atom(node_probs, False)
         new_updated_hist = self.update_hist(updated_hist, s_atom)
 
         # sampling one compatible histogram with the current new histogram
@@ -573,7 +549,12 @@ class MolGVAE(ChemModel):
                                    lambda: self.case_random_sampling(),
                                    lambda: self.case_sampling(m5, mSomma))
 
-        return tf.expand_dims(s_atom, 0), tf.squeeze(new_z_concat), fx_prob, new_updated_hist, new_sampled_hist
+        s_atom, init_v, fx = tf.expand_dims(s_atom, 0), tf.squeeze(new_z_concat), node_probs
+
+        atoms = atoms.write(idx_atom, s_atom)
+        init_vertices = init_vertices.write(idx_atom, init_v)
+        fx_prob = fx_prob.write(idx_atom, fx)
+        return idx_atom + 1, atoms, init_vertices, fx_prob, idx_sample, new_updated_hist, new_sampled_hist
 
 
     def mask_mols(self, logits, hist):
@@ -588,8 +569,8 @@ class MolGVAE(ChemModel):
         mask_bool = tf.reduce_all(equals, 0)
         mask = tf.cast(mask_bool, tf.float32)
         logits_masked = tf.cond(tf.reduce_any(mask_bool),
-                               lambda: logits + (mask * LARGE_NUMBER - LARGE_NUMBER),
-                               lambda: logits)
+                                lambda: logits + (mask * LARGE_NUMBER - LARGE_NUMBER),
+                                lambda: logits)
         return logits_masked, mask_bool
 
     """
@@ -610,14 +591,13 @@ class MolGVAE(ChemModel):
         idx = tf.random_uniform([], maxval=max_n, dtype=tf.int32)
         return self.placeholders['histograms'][idx]
 
-
     """
     Sample the id of the atom for a value fo probabilities. 
     In training always apply argmax, while in generation it is possible to choose among distribution or argmax
     """
     def sample_atom(self, fx_prob, training):
         if training:
-                idx = tf.argmax(fx_prob, output_type=tf.int32)
+            idx = tf.argmax(fx_prob, output_type=tf.int32)
         else:
             if self.params['use_argmax_nodes']:
                 idx = tf.argmax(fx_prob, output_type=tf.int32)
@@ -643,6 +623,7 @@ class MolGVAE(ChemModel):
         # summing the two array
         new_hist = tf.add(old_hist, array)
         return new_hist
+
 
     def construct_logit_matrices(self):
         v = self.placeholders['num_vertices']
@@ -727,9 +708,9 @@ class MolGVAE(ChemModel):
         corr_type_edge = tf.cast(tf.not_equal(tf.argmax(edges_type_pred_masked, axis=1),
                                               tf.argmax(gt_edges_type_pred, axis=1)),
                                  tf.float32)
-
         self.ops['edge_pred_error'] = tf.reduce_sum(corr_edge, axis=[1, 2])
         self.ops['edge_type_pred_error'] = tf.reduce_sum(corr_type_edge, axis=[1, 2])
+
 
     def generate_edges(self, idx, edges_pred, edges_type_pred, valences):
         v = self.placeholders['num_vertices']
@@ -743,9 +724,9 @@ class MolGVAE(ChemModel):
         edges_val_req = tf.tile(edges_val_req, [batch_size, v, 1])
 
         latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
-        self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
-                                                                                latent_node_state],
-                                                                               axis=2)  # [b, v, 2h]
+        filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'], latent_node_state], axis=2)
+        self.ops["initial_repre_for_decoder"] = filtered_z_sampled   # [b, v, 2h]
+
         # graph features
         graph_sum = tf.reduce_sum(filtered_z_sampled, axis=1, keep_dims=True)  # [b, 1, 2h]
         graph_sum = tf.tile(graph_sum, [1, v, 1])
@@ -904,86 +885,37 @@ class MolGVAE(ChemModel):
         output=tf.sigmoid(output)
         return output
 
-    def calculate_incremental_results(self, raw_data, bucket_sizes, file_name):
-        incremental_results = []
-        # copy the raw_data if more than 1 BFS path is added
-        new_raw_data = []
-        for idx, d in enumerate(raw_data):
-            # Use canonical order or random order here. canonical order starts from index 0. random order starts from random nodes
-            if not self.params["path_random_order"]:
-                # Use several different starting index if using multi BFS path
-                if self.params["multi_bfs_path"]:
-                    list_of_starting_idx = list(range(self.params["bfs_path_count"]))
-                else:
-                    list_of_starting_idx = [0]  # the index 0
-            else:
-                # get the node length for this molecule
-                node_length=len(d["node_features"])
-                if self.params["multi_bfs_path"]:
-                    list_of_starting_idx = np.random.choice(node_length, self.params["bfs_path_count"], replace=True)  #randomly choose several
-                else:
-                    list_of_starting_idx = [random.choice(list(range(node_length)))]  # randomly choose one
-
-            # default it is only one element to 0
-            for list_idx, starting_idx in enumerate(list_of_starting_idx):
-                # choose a bucket
-                chosen_bucket_idx = np.argmax(bucket_sizes > max([v for e in d['graph']
-                                                                    for v in [e[0], e[2]]]))
-                chosen_bucket_size = bucket_sizes[chosen_bucket_idx]
-
-                # Calculate incremental results without master node
-                nodes_no_master, edges_no_master = to_graph(d['smiles'], self.params["dataset"])                
-                incremental_adj_mat,distance_to_others,node_sequence,edge_type_masks,edge_type_labels,local_stop, edge_masks, edge_labels, overlapped_edge_features=\
-                construct_incremental_graph(dataset, edges_no_master, chosen_bucket_size, 
-                                            len(nodes_no_master), nodes_no_master, self.params, initial_idx=starting_idx)
-                if self.params["sample_transition"] and list_idx > 0:
-                    incremental_results[-1] = [x+y for x, y in zip(incremental_results[-1], [incremental_adj_mat,distance_to_others,
-                                       node_sequence,edge_type_masks,edge_type_labels,local_stop, edge_masks, edge_labels, overlapped_edge_features])]
-                else:
-                    incremental_results.append([incremental_adj_mat, distance_to_others, node_sequence, edge_type_masks, 
-                                               edge_type_labels, local_stop, edge_masks, edge_labels, overlapped_edge_features])
-
-                    # copy the raw_data here 
-                    new_raw_data.append(d)
-                if idx % 50 == 0:
-                    print('finish calculating %d incremental matrices' % idx, end="\r")
-        return incremental_results, new_raw_data
-
     # ----- Data preprocessing and chunking into minibatches:
     def process_raw_graphs(self, raw_data, is_training_data, file_name, bucket_sizes=None):
         if bucket_sizes is None:
             bucket_sizes = dataset_info(self.params["dataset"])["bucket_sizes"]
-        incremental_results, raw_data=self.calculate_incremental_results(raw_data, bucket_sizes, file_name)
         bucketed = defaultdict(list)
         x_dim = len(raw_data[0]["node_features"][0])
+        hist_dim = dataset_info(dataset)['hist_dim']
 
-        for d, (incremental_adj_mat,distance_to_others,node_sequence,edge_type_masks,edge_type_labels,local_stop, edge_masks, edge_labels, overlapped_edge_features)\
-                            in zip(raw_data, incremental_results):
+        for idx, d in enumerate(raw_data):
             # choose a bucket
             chosen_bucket_idx = np.argmax(bucket_sizes > max([v for e in d['graph']
                                                                 for v in [e[0], e[2]]]))
-            chosen_bucket_size = bucket_sizes[chosen_bucket_idx]            
+            chosen_bucket_size = bucket_sizes[chosen_bucket_idx]
+
+            # calc incremental hist for node
+            incr_hist, incr_diff_hist, incr_node_mask = incr_node(d, self.params['dataset'])
+
             # total number of nodes in this data point
             n_active_nodes = len(d["node_features"])
             bucketed[chosen_bucket_idx].append({
                 'smiles': d['smiles'],
                 'adj_mat': graph_to_adj_mat(d['graph'], chosen_bucket_size, self.num_edge_types, self.params['tie_fwd_bkwd']),
-                'incre_adj_mat': incremental_adj_mat,
-                'distance_to_others': distance_to_others,
-                'overlapped_edge_features': overlapped_edge_features,
-                'node_sequence': node_sequence,
-                'edge_type_masks': edge_type_masks,
-                'edge_type_labels': edge_type_labels,
-                'edge_masks': edge_masks,
-                'edge_labels': edge_labels,
-                'local_stop': local_stop,
-                'number_iteration': len(local_stop),
-                'init': d["node_features"] + [[0 for _ in range(x_dim)] for __ in
-                                              range(chosen_bucket_size - n_active_nodes)],
+                'init': d["node_features"] + [[0 for _ in range(x_dim)] for __ in range(chosen_bucket_size - n_active_nodes)],
                 'labels': [d["targets"][task_id][0] for task_id in self.params['task_ids']],
-                'mask': [1. for _ in range(n_active_nodes) ] + [0. for _ in range(chosen_bucket_size - n_active_nodes)],
+                'mask': [1. for _ in range(n_active_nodes)] + [0. for _ in range(chosen_bucket_size - n_active_nodes)],
                 'hist': d['hist'],
+                'incr_hist': incr_hist + [[0 for _ in range(hist_dim)] for __ in range(chosen_bucket_size - n_active_nodes)],
+                'incr_diff_hist': incr_diff_hist + [[0 for _ in range(hist_dim)] for __ in range(chosen_bucket_size - n_active_nodes)],
+                'incr_node_mask': incr_node_mask + [[0 for _ in range(x_dim)] for __ in range(chosen_bucket_size - n_active_nodes)],
             })
+            print('Finish preprocessing %d graph' % idx, end="\r")
 
         if is_training_data:
             for (bucket_idx, bucket) in bucketed.items():
@@ -1004,58 +936,16 @@ class MolGVAE(ChemModel):
         return (bucketed, bucket_sizes, bucket_at_step)
 
     def make_batch(self, elements, maximum_vertice_num):
-        # get maximum number of iterations in this batch. used to control while_loop
-        max_iteration_num=-1
+        batch_data = {'smiles':[], 'adj_mat': [], 'init': [], 'labels': [], 'node_mask': [], 'task_masks': [],
+                      'hist': [], 'incr_hist': [], 'incr_diff_hist': [], 'incr_node_mask': []}
         for d in elements:
-            max_iteration_num=max(d['number_iteration'], max_iteration_num)
-        batch_data = {'smiles':[], 'adj_mat': [], 'init': [], 'labels': [], 'edge_type_masks':[], 'edge_type_labels':[], 'edge_masks':[],
-                'edge_labels':[],'node_mask': [], 'task_masks': [], 'node_sequence':[],
-                'iteration_mask': [], 'local_stop': [], 'incre_adj_mat': [], 'distance_to_others': [], 
-                'max_iteration_num': max_iteration_num, 'overlapped_edge_features': [], 'hist': []}
-        for d in elements: 
-            # sparse to dense for saving memory           
-            incre_adj_mat = incre_adj_mat_to_dense(d['incre_adj_mat'], self.num_edge_types, maximum_vertice_num)
-            distance_to_others = distance_to_others_dense(d['distance_to_others'], maximum_vertice_num)
-            overlapped_edge_features = overlapped_edge_features_to_dense(d['overlapped_edge_features'], maximum_vertice_num)
-            node_sequence = node_sequence_to_dense(d['node_sequence'],maximum_vertice_num)
-            edge_type_masks = edge_type_masks_to_dense(d['edge_type_masks'], maximum_vertice_num,self.num_edge_types)
-            edge_type_labels = edge_type_labels_to_dense(d['edge_type_labels'], maximum_vertice_num,self.num_edge_types)
-            edge_masks = edge_masks_to_dense(d['edge_masks'], maximum_vertice_num)
-            edge_labels = edge_labels_to_dense(d['edge_labels'], maximum_vertice_num)
-
             batch_data['adj_mat'].append(d['adj_mat'])
             batch_data['init'].append(d['init'])
             batch_data['node_mask'].append(d['mask'])
-
-            batch_data['incre_adj_mat'].append(incre_adj_mat +
-                [np.zeros((self.num_edge_types, maximum_vertice_num,maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['distance_to_others'].append(distance_to_others + 
-                [np.zeros((maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['overlapped_edge_features'].append(overlapped_edge_features + 
-                [np.zeros((maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['node_sequence'].append(node_sequence + 
-                [np.zeros((maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['edge_type_masks'].append(edge_type_masks + 
-                [np.zeros((self.num_edge_types, maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['edge_masks'].append(edge_masks + 
-                [np.zeros((maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['edge_type_labels'].append(edge_type_labels + 
-                [np.zeros((self.num_edge_types, maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['edge_labels'].append(edge_labels + 
-                [np.zeros((maximum_vertice_num)) 
-                            for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['iteration_mask'].append([1 for _ in range(d['number_iteration'])]+
-                                     [0 for _ in range(max_iteration_num-d['number_iteration'])])
-            batch_data['local_stop'].append([int(s) for s in d["local_stop"]]+ 
-                                     [0 for _ in range(max_iteration_num-d['number_iteration'])])
             batch_data['hist'].append(d['hist'])
+            batch_data['incr_hist'].append(d['incr_hist'])
+            batch_data['incr_diff_hist'].append(d['incr_diff_hist'])
+            batch_data['incr_node_mask'].append(d['incr_node_mask'])
             batch_data['smiles'].append(d['smiles'])
 
             target_task_values = []
@@ -1078,12 +968,6 @@ class MolGVAE(ChemModel):
                               distance_to_others, overlapped_edge_dense, node_sequence, edge_type_masks, edge_masks,
                               random_normal_states, is_generative):
         if incre_adj_mat is None:
-            incre_adj_mat = np.zeros((1, 1, self.num_edge_types, 1, 1))
-            distance_to_others = np.zeros((1, 1, 1))
-            overlapped_edge_dense = np.zeros((1, 1, 1))
-            node_sequence = np.zeros((1, 1, 1))
-            edge_type_masks = np.zeros((1, 1, self.num_edge_types, 1))
-            edge_masks = np.zeros((1, 1, 1))
             latent_node_symbol = np.zeros((1, 1, self.params["num_symbols"]))
 
         prob = self.histograms['filter'][1][int(num_vertices)]
@@ -1098,23 +982,15 @@ class MolGVAE(ChemModel):
             self.placeholders['use_teacher_forcing_nodes']: False,
             self.placeholders['is_generative']: is_generative,
             self.placeholders['z_prior']: random_normal_states, # [1, v, h]
-            self.placeholders['incre_adj_mat']: incre_adj_mat,  # [1, 1, e, v, v]
             self.placeholders['num_vertices']: num_vertices,  # v
             self.placeholders['node_symbols']: [elements['init']],
             self.ops['latent_node_symbols']: latent_node_symbol,
             self.placeholders['adjacency_matrix']: [elements['adj_mat']],
             self.placeholders['node_mask']: [elements['mask']],
-
             self.placeholders['graph_state_keep_prob']: 1,
             self.placeholders['edge_weight_dropout_keep_prob']: 1,
-            self.placeholders['iteration_mask']: [[1]],
             self.placeholders['out_layer_dropout_keep_prob']: 1.0,
-            self.placeholders['distance_to_others']: distance_to_others,  # [1, 1,v]
-            self.placeholders['overlapped_edge_features']: overlapped_edge_dense,
             self.placeholders['max_iteration_num']: 1,
-            self.placeholders['node_sequence']: node_sequence,  # [1, 1, v]
-            self.placeholders['edge_type_masks']: edge_type_masks,  # [1, 1, e, v]
-            self.placeholders['edge_masks']: edge_masks,  # [1, 1, v]
             self.placeholders['histograms']: self.histograms['train'][0],
             self.placeholders['n_histograms']: values,
             self.placeholders['hist']: [self.histograms['train'][0][sampled_idx]],
@@ -1133,7 +1009,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['node_mask']: [elements['mask']],
                 self.placeholders['graph_state_keep_prob']: 1,
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
-                self.placeholders['iteration_mask']: [[1]],
                 self.placeholders['out_layer_dropout_keep_prob'] : 1.0,
                 self.placeholders['histograms']: self.histograms['train'][0],
                 self.placeholders['n_histograms']: self.histograms['train'][1],
@@ -1146,7 +1021,6 @@ class MolGVAE(ChemModel):
     """
     def get_dynamic_edge_feed_dict(self, elements, latent_nodes, latent_node_symbol, num_vertices):
         return {
-                self.placeholders['adjacency_matrix']: elements['adj_mat'],  # [1, 1, e, v, v]
                 self.placeholders['num_vertices']: num_vertices,  # v
                 self.ops['initial_nodes_decoder']: latent_nodes,
                 self.ops['latent_node_symbols']: latent_node_symbol,
@@ -1154,7 +1028,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['node_mask']: [elements['mask']],
                 self.placeholders['graph_state_keep_prob']: 1,
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
-                self.placeholders['iteration_mask']: [[1]],
                 self.placeholders['out_layer_dropout_keep_prob']: 1.0,
                 self.placeholders['max_iteration_num']: 1,
             }
@@ -1171,7 +1044,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['adjacency_matrix']: [elements['adj_mat']],
                 self.placeholders['graph_state_keep_prob']: 1,
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
-                self.placeholders['iteration_mask']: [[1]],
                 self.placeholders['out_layer_dropout_keep_prob']: 1.0,
                 self.placeholders['max_iteration_num']: 1,
                 self.placeholders['is_generative']: is_generative,
@@ -1470,9 +1342,7 @@ class MolGVAE(ChemModel):
             end_idx = (bucket_counters[bucket] + 1) * self.params['batch_size']
             elements = bucketed[bucket][start_idx:end_idx]
             batch_data = self.make_batch(elements, bucket_sizes[bucket])
-
             num_graphs = len(batch_data['init'])
-            initial_representations = batch_data['init']
             batch_feed_dict = {
                 self.placeholders['node_symbols']: batch_data['init'],
                 self.placeholders['target_values']: np.transpose(batch_data['labels'], axes=[1,0]),
@@ -1483,21 +1353,13 @@ class MolGVAE(ChemModel):
                 self.placeholders['node_mask']: batch_data['node_mask'],
                 self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
                 self.placeholders['edge_weight_dropout_keep_prob']: edge_dropout_keep_prob,
-                self.placeholders['iteration_mask']: batch_data['iteration_mask'],
-                self.placeholders['incre_adj_mat']: batch_data['incre_adj_mat'],
-                self.placeholders['distance_to_others']: batch_data['distance_to_others'],
-                self.placeholders['node_sequence']: batch_data['node_sequence'],
-                self.placeholders['edge_type_masks']: batch_data['edge_type_masks'],
-                self.placeholders['edge_type_labels']: batch_data['edge_type_labels'],
-                self.placeholders['edge_masks']: batch_data['edge_masks'],
-                self.placeholders['edge_labels']: batch_data['edge_labels'],
-                self.placeholders['local_stop']: batch_data['local_stop'],
-                self.placeholders['max_iteration_num']: batch_data['max_iteration_num'],
                 self.placeholders['kl_trade_off_lambda']: self.params['kl_trade_off_lambda'],
-                self.placeholders['overlapped_edge_features']: batch_data['overlapped_edge_features'],
                 self.placeholders['histograms']: self.histograms['train'][0],  # TODO: rember to change if it is needed
                 self.placeholders['n_histograms']: self.histograms['train'][1],  # TODO: rember to change if it is needed
-                self.placeholders['hist']: batch_data['hist']
+                self.placeholders['hist']: batch_data['hist'],
+                self.placeholders['incr_hist']: batch_data['incr_hist'],
+                self.placeholders['incr_diff_hist']: batch_data['incr_diff_hist'],
+                self.placeholders['incr_node_mask']: batch_data['incr_node_mask'],
             }
             bucket_counters[bucket] += 1
             # print(batch_data['smiles'])  # TODO: pr

@@ -229,6 +229,7 @@ def incr_node(mol, dataset):
     c_hist = [0 for i in range(hist_dim)]
     incr_hist.append(np.copy(c_hist).tolist())
     incr_diff_hist.append(mol['hist'])
+    incr_node_mask.append(calc_node_mask(mol['hist'], dataset))
     for n in mol['node_features']:
         idx_mol = np.argmax(n)
         val = mol_valences[idx_mol]
@@ -243,7 +244,7 @@ def incr_node(mol, dataset):
 
         # calc mask for the nodes_prob
         incr_node_mask.append(calc_node_mask(diff_hist, dataset))
-    return incr_hist[:-1], incr_diff_hist[:-1], incr_node_mask
+    return incr_hist[:-1], incr_diff_hist[:-1], incr_node_mask[:-1]
 
 
 def to_graph(smiles, dataset):

@@ -108,8 +108,16 @@ class ChemModel(object):
             self.weights = {}
             self.ops = {}
 
-            self.make_model()
-            self.make_train_step()
+            with tf.name_scope('model'):
+                self.make_model()
+            with tf.name_scope('tain_steps'):
+                self.make_train_step()
+
+            # tensorboard
+            suffix = 'core' if self.params['suffix'] is None else self.params['suffix']
+            self.tb_writer_train = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + suffix + '/train/')
+            self.tb_writer_valid = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + suffix + '/valid/')
+            self.tb_writer_train.add_graph(self.graph)
 
             # Restore/initialize variables:
             restore_file = args.get('--restore')
@@ -117,6 +125,7 @@ class ChemModel(object):
                 self.restore_model(restore_file)
             else:
                 self.initialize_model()
+
 
     def load_data(self, file_name, is_training_data: bool):
         full_path = os.path.join(self.data_dir, file_name)
@@ -177,7 +186,6 @@ class ChemModel(object):
         self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
         # whether this session is for generating new graphs or not
         self.placeholders['is_generative'] = tf.placeholder(tf.bool, [], name='is_generative')
-        self.placeholders['use_teacher_forcing_nodes'] = tf.placeholder(tf.bool, None, name='use_teacher_forcing_nodes')
 
         with tf.variable_scope("graph_model"):
             self.prepare_specific_graph_model()
@@ -202,23 +210,28 @@ class ChemModel(object):
                 self.ops['final_node_representations'] = initial_state
 
         # Calculate p(z|x)'s mean and log variance
-        self.compute_mean_and_logvariance()
+        with tf.name_scope('get_distribution'):
+            self.compute_mean_and_logvariance()
 
         # Sample from a gaussian distribution according to the mean and log variance
-        self.sample_with_mean_and_logvariance()
+        with tf.name_scope('sample'):
+            self.sample_with_mean_and_logvariance()
 
         # obtains te latent representation of the nodes. This is the decoder's first part
         # it always use the NN function without teacher forcing
-        self.construct_nodes()
+        with tf.name_scope('gen_nodes'):
+            self.construct_nodes()
 
         # Construct logit matrices for both edges and edge types. This is the decoder's second part
         # it uses teacher forcing in the training
-        self.construct_logit_matrices()
+        with tf.name_scope('gen_edges'):
+            self.construct_logit_matrices()
 
         # Obtain losses for edges and edge types
-        self.ops['qed_loss'] = []
-        self.ops['loss'] = self.construct_loss()
-        
+        with tf.name_scope('loss'):
+            self.ops['qed_loss'] = []
+            self.ops['loss'] = self.construct_loss()
+
     def make_train_step(self):
         trainable_vars = self.sess.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
         if self.args.get('--freeze-graph-model'):
@@ -275,7 +288,7 @@ class ChemModel(object):
 
     def construct_loss(self):
         raise Exception("Models have to implement construct_loss!")
-    
+
     def make_minibatch_iterator(self, data: Any, is_training: bool):
         raise Exception("Models have to implement make_minibatch_iterator!")
 
@@ -291,22 +304,18 @@ class ChemModel(object):
         reconstruction = 0
         start_time = time.time()
         processed_graphs = 0
-        if is_training and self.params['num_teacher_forcing'] >= epoch_num:
-            teacher_forcing = True
-        else:
-            teacher_forcing = False
-        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=self.params['batch_size']) #self.params['batch_size'])
 
+        n_batches = len(data[2])
+        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size= self.params['batch_size'])
         for step, batch_data in enumerate(batch_iterator):
             num_graphs = batch_data[self.placeholders['num_graphs']]
             processed_graphs += num_graphs
             batch_data[self.placeholders['is_generative']] = False
-            batch_data[self.placeholders['use_teacher_forcing_nodes']] = teacher_forcing
             batch_data[self.placeholders['z_prior']] = utils.generate_std_normal(self.params['batch_size'],
                                                                                  batch_data[self.placeholders['num_vertices']],
                                                                                  self.params['latent_space_size'])
-
             if is_training:
+                tb_writer = self.tb_writer_train
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']
                 fetch_list = [self.ops['loss'], self.ops['train_step'],
                               self.ops["edge_loss"], self.ops['kl_loss'],
@@ -316,13 +325,14 @@ class ChemModel(object):
                               self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'],
                               self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
-                              self.ops['reconstruction']]
+                              self.ops['reconstruction'], self.ops['summary']]
             else:
+                tb_writer = self.tb_writer_valid
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['sampled_atoms'],
                               self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
-                              self.ops['reconstruction']]
+                              self.ops['reconstruction'], self.ops['summary']]
             result = self.sess.run(fetch_list, feed_dict=batch_data)
             batch_loss = result[0]
             loss += batch_loss * num_graphs
@@ -345,7 +355,16 @@ class ChemModel(object):
                 edge_type_pred_error += result[8] * num_graphs
                 reconstruction += result[9]
 
-            print("Running %s, batch %i (has %i graphs). "
+            if self.params['tensorboard'] is not None:
+                freq = self.params['tensorboard']
+                tmp_limit = n_batches // freq
+                # print(n_batches, tmp_limit, step // tmp_limit, step % tmp_limit)
+                if step % tmp_limit == 0:
+                    global_step_counter = int((freq+1) * (epoch_num-1) + step // tmp_limit)
+                    tb_writer.add_summary(result[-1], global_step=global_step_counter)
+                    tb_writer.flush()
+
+            print("Running %s, batch %i/%i (has %i graphs). "
                   "Total loss: %.4f | "
                   "Edge loss: %.4f | "
                   "Node loss: %.4f | "
@@ -354,7 +373,7 @@ class ChemModel(object):
                   "Node pred: %.4f | "
                   "Edge pred: (%.4f, %.4f) | "
                   "Reconstruction: %.4f "%
-                  (epoch_name, step, num_graphs,
+                  (epoch_name, step, n_batches, num_graphs,
                    loss / processed_graphs,
                    mean_edge_loss / processed_graphs,
                    mean_node_loss / processed_graphs,
@@ -367,8 +386,6 @@ class ChemModel(object):
 
             # print("Hists: ", batch_data[self.placeholders['hist']])  # TODO: pr
             # exit(0)  # TODO: exit
-
-
 
         mean_edge_loss /= processed_graphs
         mean_node_loss /= processed_graphs
@@ -436,6 +453,7 @@ class ChemModel(object):
 
                     with open(self.log_file, 'w') as f:
                         json.dump(log_to_save, f, indent=4)
+
 
                     self.save_model(str(epoch)+("_%s%s.pickle" % (self.params["dataset"], suff)))
 

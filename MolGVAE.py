@@ -48,7 +48,7 @@ class MolGVAE(ChemModel):
     def default_params(cls):
         params = dict(super().default_params())
         params.update({
-                        'suffix': None,              
+                        'suffix': None,
                         'log_dir': './results',
                         'task_sample_ratios': {},
                         'use_edge_bias': True,                                          # whether use edge bias in gnn
@@ -63,7 +63,6 @@ class MolGVAE(ChemModel):
                         'prior_learning_rate': 0.05,
                         'stop_criterion': 0.01,
                         'num_epochs': 1000 if dataset == 'zinc' else 1000,
-                        'num_teacher_forcing': 1000 if dataset == 'zinc' else 1000,
                         'number_of_generation': 20000,
                         'optimization_step': 0,      
                         'maximum_distance': 50,
@@ -117,7 +116,8 @@ class MolGVAE(ChemModel):
                         "use_rec_multi_threads": True,
                         "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
                         "loss_normalized_per_batch": False,
-                        "fix_molecule_validation": True
+                        "fix_molecule_validation": True,
+                        "tensorboard": 3,                   # frequency if we use tensorboard else None
                         })
 
         return params
@@ -403,8 +403,8 @@ class MolGVAE(ChemModel):
     def construct_nodes(self):
         is_generative = self.placeholders['is_generative']
         initial_nodes_decoder, node_symbol_prob, sampled_atoms = tf.cond(is_generative,
+                                                                         lambda: self.gen_procedure(),
                                                                          lambda: self.train_procedure(),
-                                                                         lambda: self.construct_nodes2(),
                                                                          name='train_gen_condition')
 
         self.ops['initial_nodes_decoder'] = initial_nodes_decoder * self.ops['graph_state_mask']
@@ -441,22 +441,25 @@ class MolGVAE(ChemModel):
         if self.params['use_mask']:
             flat_incr_node_mask = tf.reshape(self.placeholders['incr_node_mask'], [-1, num_symbols])
             atom_logits = tf.where(tf.reduce_sum(flat_incr_node_mask, 1) > 0,
-                                   atom_logits + (atom_logits * LARGE_NUMBER - LARGE_NUMBER),
+                                   atom_logits + (flat_incr_node_mask * LARGE_NUMBER - LARGE_NUMBER),
                                    atom_logits)
         atom_prob = tf.nn.softmax(atom_logits)
         node_symbol_prob = tf.reshape(atom_prob, [batch_size, v, num_symbols])
 
         # calc type of atom with or without TF
-        sampled_atoms = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
-                                lambda: self.placeholders['node_symbols'],
-                                lambda: node_symbol_prob)
+        # WARNING: using this faster code we had to fix the mask and the incremental_histogram based on the right atoms type.
+        # Sampling from the probability is incoherent. This mean that we have to use TF even here and returns always the rigth atom
+        # sampled_atoms = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
+        #                         lambda: self.placeholders['node_symbols'],
+        #                         lambda: node_symbol_prob)
+        sampled_atoms = self.placeholders['node_symbols']
         sampled_atoms_casted = tf.cast(tf.argmax(sampled_atoms, axis=-1, output_type=tf.int32), tf.float32)
         return initial_nodes_decoder, node_symbol_prob, sampled_atoms_casted
 
     """
     Construct the nodes representations
     """
-    def construct_nodes2(self):
+    def gen_procedure(self):
         h_dim_de = self.params['hidden_size_decoder']
         num_symbols = self.params['num_symbols']
         batch_size = tf.shape(self.ops['z_sampled'])[0]
@@ -858,9 +861,25 @@ class MolGVAE(ChemModel):
         self.ops['mean_node_symbol_loss'] = tf.reduce_mean(self.ops["node_symbol_loss"])
         self.ops['mean_kl_loss'] = tf.reduce_mean(kl_trade_off_lambda *self.ops['kl_loss'])
         self.ops['mean_total_qed_loss'] = self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
-        return tf.reduce_mean(self.ops["edge_loss"] + self.ops['node_symbol_loss'] + \
+        loss = tf.reduce_mean(self.ops["edge_loss"] + self.ops['node_symbol_loss'] + \
                               kl_trade_off_lambda *self.ops['kl_loss'])\
                               + self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
+        # tf summary
+        tf.summary.histogram("mean", self.ops['mean'])
+        tf.summary.histogram("logvariance", self.ops['logvariance'])
+        tf.summary.scalar('total_qed_loss', self.ops['total_qed_loss'])
+        tf.summary.scalar('mean_edge_loss', self.ops['mean_edge_loss'])
+        tf.summary.scalar('mean_node_symbol_loss', self.ops['mean_node_symbol_loss'])
+        tf.summary.scalar('mean_kl_loss', self.ops['mean_kl_loss'])
+        tf.summary.scalar('mean_total_qed_loss', self.ops['mean_total_qed_loss'])
+        tf.summary.scalar('loss', self.ops['total_qed_loss'])
+        tf.summary.scalar('reconstruction', self.ops['reconstruction'])
+        tf.summary.scalar('node_pred_error', self.ops['node_pred_error'])
+        tf.summary.scalar('edge_pred_error', self.ops['edge_pred_error'])
+        tf.summary.scalar('edge_type_pred_error', self.ops['edge_type_pred_error'])
+        self.ops['summary'] = tf.summary.merge_all()
+
+        return loss
 
     def IoU(self, y_pred, y_true):
         # van Beers, Floris, et al. "Deep Neural Networks with Intersection over Union Loss for Binary Image Segmentation.
@@ -979,7 +998,7 @@ class MolGVAE(ChemModel):
         else:
             sampled_idx = np.random.choice(len(self.histograms['train'][0]), p=prob)
         return {
-            self.placeholders['use_teacher_forcing_nodes']: False,
+
             self.placeholders['is_generative']: is_generative,
             self.placeholders['z_prior']: random_normal_states, # [1, v, h]
             self.placeholders['num_vertices']: num_vertices,  # v
@@ -1001,7 +1020,6 @@ class MolGVAE(ChemModel):
     """
     def get_dynamic_nodes_feed_dict(self, elements, num_vertices, z_sampled, is_generative):
         return {
-                self.placeholders['use_teacher_forcing_nodes']: False,
                 self.placeholders['is_generative']: is_generative,
                 self.ops['z_sampled']: z_sampled,  # [hl]
                 self.placeholders['num_vertices']: num_vertices,     # v
@@ -1336,7 +1354,8 @@ class MolGVAE(ChemModel):
         bucket_counters = defaultdict(int)
         dropout_keep_prob = self.params['graph_state_dropout_keep_prob'] if is_training else 1.
         edge_dropout_keep_prob = self.params['edge_weight_dropout_keep_prob'] if is_training else 1.
-        for step in range(len(bucket_at_step)):
+        n_batches = len(bucket_at_step)
+        for step in range(n_batches):
             bucket = bucket_at_step[step]
             start_idx = bucket_counters[bucket] * self.params['batch_size']
             end_idx = (bucket_counters[bucket] + 1) * self.params['batch_size']
@@ -1362,8 +1381,12 @@ class MolGVAE(ChemModel):
                 self.placeholders['incr_node_mask']: batch_data['incr_node_mask'],
             }
             bucket_counters[bucket] += 1
-            # print(batch_data['smiles'])  # TODO: pr
-            # print(batch_data['init'])  # TODO: pr
+            # print('hist', batch_data['hist'])  # TODO: pr
+            # print('incr_hist', batch_data['incr_hist'])  # TODO: pr
+            # print('incr_diff_hist', batch_data['incr_diff_hist'])  # TODO: pr
+            # print('incr_node_mask', batch_data['incr_node_mask'])  # TODO: pr
+            # print('node_symbols', batch_data['init'])  # TODO: pr
+            # exit(0)
             yield batch_feed_dict
 
 if __name__ == "__main__":

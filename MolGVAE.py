@@ -390,8 +390,10 @@ class MolGVAE(ChemModel):
         # Sample from normal distribution
         z_prior = tf.reshape(self.placeholders['z_prior'], [-1, ls_dim])
         # Train: sample from u, Sigma. Generation: sample from 0,1
-        z_sampled = tf.cond(self.placeholders['is_generative'], lambda: z_prior, # standard normal
-                    lambda: tf.add(self.ops['mean'], tf.multiply(tf.sqrt(tf.exp(self.ops['logvariance'])), z_prior)))
+        if self.params['generation'] in [0, 2, 3]:  # Training, test and reconstruction
+            z_sampled = tf.add(self.ops['mean'], tf.multiply(tf.sqrt(tf.exp(self.ops['logvariance'])), z_prior))
+        else:
+            z_sampled = z_prior
         # filter
         z_sampled = tf.reshape(z_sampled, [-1, v, ls_dim]) * self.ops['graph_state_mask']
         self.ops['z_sampled'] = z_sampled
@@ -401,21 +403,19 @@ class MolGVAE(ChemModel):
     Construct the nodes representations
     """
     def construct_nodes(self):
-        is_generative = self.placeholders['is_generative']
-        initial_nodes_decoder, node_symbol_prob, sampled_atoms = tf.cond(is_generative,
-                                                                         lambda: self.gen_procedure(),
-                                                                         lambda: self.train_procedure(),
-                                                                         name='train_gen_condition')
+        if self.params['generation'] in [0, 3]:  # Training and test
+            initial_nodes_decoder, node_symbol_prob, sampled_atoms = self.train_procedure()
+        elif self.params['generation'] in [1, 2]:  # Reconstruction and Generation
+            initial_nodes_decoder, node_symbol_prob, sampled_atoms = self.gen_rec_procedure()
 
         self.ops['initial_nodes_decoder'] = initial_nodes_decoder * self.ops['graph_state_mask']
         self.ops['node_symbol_prob'] = node_symbol_prob * self.ops['graph_state_mask']
-        self.ops['sampled_atoms'] = sampled_atoms * self.placeholders['node_mask']
+        self.ops['sampled_atoms'] = sampled_atoms * tf.cast(self.placeholders['node_mask'], tf.int32)
 
         # calc one hot repr. for type of atom
-        self.ops['latent_node_symbols'] = tf.one_hot(tf.cast(self.ops['sampled_atoms'], tf.int32),
+        self.ops['latent_node_symbols'] = tf.one_hot(self.ops['sampled_atoms'],
                                                      self.params['num_symbols'],
                                                      name='latent_node_symbols') * self.ops['graph_state_mask']
-
 
     def train_procedure(self):
         h_dim_de = self.params['hidden_size_decoder']
@@ -453,13 +453,11 @@ class MolGVAE(ChemModel):
         #                         lambda: self.placeholders['node_symbols'],
         #                         lambda: node_symbol_prob)
         sampled_atoms = self.placeholders['node_symbols']
-        sampled_atoms_casted = tf.cast(tf.argmax(sampled_atoms, axis=-1, output_type=tf.int32), tf.float32)
+        sampled_atoms_casted = tf.argmax(sampled_atoms, axis=-1, output_type=tf.int32)
         return initial_nodes_decoder, node_symbol_prob, sampled_atoms_casted
 
-    """
-    Construct the nodes representations
-    """
-    def gen_procedure(self):
+
+    def gen_rec_procedure(self):
         h_dim_de = self.params['hidden_size_decoder']
         num_symbols = self.params['num_symbols']
         batch_size = tf.shape(self.ops['z_sampled'])[0]
@@ -468,6 +466,7 @@ class MolGVAE(ChemModel):
         atoms = tf.TensorArray(dtype=tf.int32, size=batch_size, element_shape=[None, 1])
         init_atoms = tf.TensorArray(dtype=tf.float32, size=batch_size, element_shape=[None, h_dim_de])
         fx_prob = tf.TensorArray(dtype=tf.float32, size=batch_size, element_shape=[None, num_symbols])
+
         # iteration on all the molecules in the batch size
         idx, atoms, init_atoms, fx_prob = tf.while_loop(
             lambda idx, atoms, init_atoms, fx_prob: tf.less(idx, batch_size),
@@ -481,11 +480,9 @@ class MolGVAE(ChemModel):
         nodes_type_probs = fx_prob.stack()
         atoms = atoms.stack()
 
-        return init_h_states, nodes_type_probs, tf.cast(tf.squeeze(atoms, -1), tf.float32)
+        return init_h_states, nodes_type_probs, tf.squeeze(atoms, -1)
 
-    """
-    Cycles each atom in order to generate the nodes
-    """
+
     def for_each_molecula(self, idx_sample, atoms, init_vertices_all, fx_prob_all):
         h_dim_de = self.params['hidden_size_decoder']
         num_symbols = self.params['num_symbols']
@@ -494,13 +491,20 @@ class MolGVAE(ChemModel):
         hist_dim = self.histograms['hist_dim']
         zero_hist = tf.zeros([hist_dim], tf.int32)
 
+        # select the rigth function according to reconstruction or generation
+        if self.params['generation'] == 1:
+            funct_to_call = self.generate_nodes
+        else:
+            funct_to_call = self.reconstruct_nodes
+
         sampled_atoms = tf.TensorArray(dtype=tf.int32, size=v, element_shape=[1])
         vertices = tf.TensorArray(dtype=tf.float32, size=v, element_shape=[h_dim_de])
         fx_prob = tf.TensorArray(dtype=tf.float32, size=v, element_shape=[num_symbols])
+
         # iteration on all the atoms in a molecule
         idx_atoms, a, v, fx, _, _, _ = tf.while_loop(
             lambda idx_atoms, s_atoms, vertices, fx_prob, s_idx, zero_hist, current_hist: tf.less(idx_atoms, v),
-            self.generate_nodes,
+            funct_to_call,
             (tf.constant(0), sampled_atoms, vertices, fx_prob, idx_sample, zero_hist, current_hist)
         )
 
@@ -509,6 +513,42 @@ class MolGVAE(ChemModel):
         fx_prob_all = fx_prob_all.write(idx_sample, fx.stack())
 
         return idx_sample + 1, atoms, init_vertices_all, fx_prob_all
+
+    def reconstruct_nodes(self, idx_atom, atoms, init_vertices, fx_prob, idx_sample, updated_hist, sampled_hist):
+        current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
+        current_sample_hist = self.placeholders['hist'][idx_sample]
+        current_sample_hist_casted = tf.cast(current_sample_hist, dtype=tf.float32)
+
+        # concatenation with the histogram embedding
+        current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)
+        hist_diff = tf.subtract(current_sample_hist_casted, current_hist_casted)
+        hist_diff_pos = tf.where(hist_diff > 0, hist_diff, tf.zeros_like(hist_diff))
+        conc = tf.concat([current_sample_z, current_hist_casted, hist_diff_pos], axis=0)
+        exp = tf.expand_dims(conc, 0)  # [1, z + Hdiff + Hcurrent]
+        # build a node with NN (K)
+        hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
+        new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
+
+        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
+        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        fx_logit = tf.squeeze(fx_logit)
+        if self.params['use_mask']:
+            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
+        node_probs = tf.nn.softmax(fx_logit)
+
+        # probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
+        #                       lambda: self.placeholders['node_symbols'][idx_sample][idx_atom],
+        #                       lambda: node_probs)
+        probs_value = node_probs
+        s_atom = self.sample_atom(probs_value, True)
+        new_updated_hist = self.update_hist(updated_hist, s_atom)
+
+        s_atom, init_v, fx = tf.expand_dims(s_atom, 0), tf.squeeze(new_z_concat), probs_value
+
+        atoms = atoms.write(idx_atom, s_atom)
+        init_vertices = init_vertices.write(idx_atom, init_v)
+        fx_prob = fx_prob.write(idx_atom, fx)
+        return idx_atom + 1, atoms, init_vertices, fx_prob, idx_sample, new_updated_hist, sampled_hist
 
     """
     For each node (atoms) calculates histograms and new hidden representations
@@ -991,7 +1031,7 @@ class MolGVAE(ChemModel):
     """
     def get_dynamic_feed_dict(self, elements, latent_node_symbol, incre_adj_mat, num_vertices,
                               distance_to_others, overlapped_edge_dense, node_sequence, edge_type_masks, edge_masks,
-                              random_normal_states, is_generative):
+                              random_normal_states):
         if incre_adj_mat is None:
             latent_node_symbol = np.zeros((1, 1, self.params["num_symbols"]))
 
@@ -1004,8 +1044,6 @@ class MolGVAE(ChemModel):
         else:
             sampled_idx = np.random.choice(len(self.histograms['train'][0]), p=prob)
         return {
-
-            self.placeholders['is_generative']: is_generative,
             self.placeholders['z_prior']: random_normal_states, # [1, v, h]
             self.placeholders['num_vertices']: num_vertices,  # v
             self.placeholders['node_symbols']: [elements['init']],
@@ -1023,9 +1061,8 @@ class MolGVAE(ChemModel):
     """
     Prepare the feed dict for accessing the nodes (atoms)
     """
-    def get_dynamic_nodes_feed_dict(self, elements, num_vertices, z_sampled, is_generative):
+    def get_dynamic_nodes_feed_dict(self, elements, num_vertices, z_sampled):
         return {
-                self.placeholders['is_generative']: is_generative,
                 self.ops['z_sampled']: z_sampled,  # [hl]
                 self.placeholders['num_vertices']: num_vertices,     # v
                 self.placeholders['node_symbols']: [elements['init']],
@@ -1057,7 +1094,7 @@ class MolGVAE(ChemModel):
     """
     Prepare the feed dict for accessing the sampling point in the latent space
     """
-    def get_dynamic_mean_feed_dict(self, elements, num_vertices, latent_points, is_generative):
+    def get_dynamic_mean_feed_dict(self, elements, num_vertices, latent_points):
             return {
                 self.placeholders['z_prior']: latent_points,  # [hl]
                 self.placeholders['num_vertices']: num_vertices,  # v
@@ -1067,7 +1104,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['graph_state_keep_prob']: 1,
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
                 self.placeholders['out_layer_dropout_keep_prob']: 1.0,
-                self.placeholders['is_generative']: is_generative,
             }
 
     def get_node_symbol(self, batch_feed_dict):
@@ -1136,17 +1172,17 @@ class MolGVAE(ChemModel):
     """
     Optimization in latent space. Generate one molecule for each optimization step.
     """
-    def optimization_over_prior(self, random_normal_states, num_vertices, generated_all_similes, elements, count, is_generating):
+    def optimization_over_prior(self, random_normal_states, num_vertices, generated_all_similes, elements, count):
         # record how many optimization steps are taken
         step=0
         # generate a new molecule
-        self.generate_graph_with_state(random_normal_states, num_vertices, generated_all_similes, elements, step, count, is_generating)
+        self.generate_graph_with_state(random_normal_states, num_vertices, generated_all_similes, elements, step, count)
         fetch_list = [self.ops['derivative_z_sampled'], self.ops['qed_computed_values'], self.ops['l2_loss']]
         for _ in range(self.params['optimization_step']):   
             # get current qed and derivative
             batch_feed_dict = self.get_dynamic_feed_dict(elements, None, None, num_vertices, None,
                                        None, None, None, None,
-                                       random_normal_states, is_generating)
+                                       random_normal_states)
             derivative_z_sampled, qed_computed_values, l2_loss= self.sess.run(fetch_list, feed_dict=batch_feed_dict)
             # update the states
             random_normal_states=self.gradient_ascent(random_normal_states, 
@@ -1154,15 +1190,15 @@ class MolGVAE(ChemModel):
             # generate a new molecule
             step+=1
             self.generate_graph_with_state(random_normal_states, num_vertices,
-                                           generated_all_similes, elements, step, count, is_generating)
+                                           generated_all_similes, elements, step, count)
         return random_normal_states
 
     def generate_graph_with_state(self, random_normal_states, num_vertices,
-                                  generated_all_similes, elements, step, count, is_generating):
+                                  generated_all_similes, elements, step, count):
         # Get back node symbol predictions
         # Prepare dict
         node_symbol_batch_feed_dict = self.get_dynamic_feed_dict(elements, None, None,
-                                     num_vertices, None, None, None, None, None, random_normal_states, is_generating)
+                                     num_vertices, None, None, None, None, None, random_normal_states)
         # Get predicted node probabilities
         [latent_nodes, predicted_node_symbol_prob, real_values] = self.get_node_symbol(node_symbol_batch_feed_dict)
         # Node numbers for each graph
@@ -1244,7 +1280,7 @@ class MolGVAE(ChemModel):
                 # initial state
                 random_normal_states=generate_std_normal(1, maximum_length, self.params['latent_space_size']) # [1, h]
                 random_normal_states = self.optimization_over_prior(random_normal_states, maximum_length, generated_all_similes,
-                                                                    elements, count, True)
+                                                                    elements, count)
                 count+=1
             bucket_counters[bucket] += 1
 
@@ -1257,7 +1293,7 @@ class MolGVAE(ChemModel):
             # take latent from the input encoding or from prior
             random_normal_states = generate_std_normal(1, num_vertices, self.params['latent_space_size'])  # [1, h]
             # is generative is always false here due to the sampling in the latent space
-            feed_dict = self.get_dynamic_mean_feed_dict(elements, num_vertices, random_normal_states, False)  # always false
+            feed_dict = self.get_dynamic_mean_feed_dict(elements, num_vertices, random_normal_states)  # always false
             # get the latent point according to the encoder distribution
             fetch_list = [self.ops['z_sampled']]
             [latent_point] = self.sess.run(fetch_list, feed_dict=feed_dict)
@@ -1268,7 +1304,7 @@ class MolGVAE(ChemModel):
             for n_dn in range(self.params['reconstruction_dn']):
                 # Get back node symbol predictions
                 # Prepare dict
-                node_symbol_batch_feed_dict = self.get_dynamic_nodes_feed_dict(elements, num_vertices, latent_point, False)  # always false here
+                node_symbol_batch_feed_dict = self.get_dynamic_nodes_feed_dict(elements, num_vertices, latent_point)  # always false here
                 # Get predicted node probabilities
                 [latent_nodes, predicted_node_symbol_prob, real_values] = self.get_node_symbol(node_symbol_batch_feed_dict)
                 # Node numbers for each graph

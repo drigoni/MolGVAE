@@ -186,8 +186,6 @@ class ChemModel(object):
                                                           name='target_mask')
         self.placeholders['num_graphs'] = tf.placeholder(tf.int32, [], name='num_graphs')
         self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
-        # whether this session is for generating new graphs or not
-        self.placeholders['is_generative'] = tf.placeholder(tf.bool, [], name='is_generative')
 
         with tf.variable_scope("graph_model"):
             self.prepare_specific_graph_model()
@@ -308,11 +306,10 @@ class ChemModel(object):
         processed_graphs = 0
 
         n_batches = len(data[2])
-        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size= self.params['batch_size'])
+        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=2*self.params['batch_size'])
         for step, batch_data in enumerate(batch_iterator):
             num_graphs = batch_data[self.placeholders['num_graphs']]
             processed_graphs += num_graphs
-            batch_data[self.placeholders['is_generative']] = False
             batch_data[self.placeholders['z_prior']] = utils.generate_std_normal(self.params['batch_size'],
                                                                                  batch_data[self.placeholders['num_vertices']],
                                                                                  self.params['latent_space_size'])
@@ -335,7 +332,7 @@ class ChemModel(object):
                               self.ops['reconstruction']]
             # tensorboard
             if self.params['tensorboard'] is not None and self.params['generation'] == 0:
-                fetch_list = fetch_list.append(self.ops['summary'])
+                fetch_list.append(self.ops['summary'])
                 if is_training:
                     tb_writer = self.tb_writer_train
                 else:
@@ -367,7 +364,6 @@ class ChemModel(object):
             if self.params['tensorboard'] is not None and self.params['generation'] == 0:
                 freq = self.params['tensorboard']
                 tmp_limit = n_batches // freq
-                # print(n_batches, tmp_limit, step // tmp_limit, step % tmp_limit)
                 if step % tmp_limit == 0:
                     global_step_counter = int((freq+1) * (epoch_num-1) + step // tmp_limit)
                     tb_writer.add_summary(result[-1], global_step=global_step_counter)

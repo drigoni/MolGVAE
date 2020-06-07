@@ -877,6 +877,12 @@ class MolGVAE(ChemModel):
         tf.summary.scalar('node_pred_error', self.ops['node_pred_error'])
         tf.summary.scalar('edge_pred_error', self.ops['edge_pred_error'])
         tf.summary.scalar('edge_type_pred_error', self.ops['edge_type_pred_error'])
+
+        tf.summary.histogram("final_node_representations", self.ops['final_node_representations'][1])
+        tf.summary.histogram('node_embedding_weights', self.weights['node_embedding'])
+        tf.summary.histogram('edge_gen0', self.weights['edge_gen0'])
+        tf.summary.histogram('edge_gen', self.weights['edge_gen'])
+
         self.ops['summary'] = tf.summary.merge_all()
 
         return loss
@@ -1009,7 +1015,6 @@ class MolGVAE(ChemModel):
             self.placeholders['graph_state_keep_prob']: 1,
             self.placeholders['edge_weight_dropout_keep_prob']: 1,
             self.placeholders['out_layer_dropout_keep_prob']: 1.0,
-            self.placeholders['max_iteration_num']: 1,
             self.placeholders['histograms']: self.histograms['train'][0],
             self.placeholders['n_histograms']: values,
             self.placeholders['hist']: [self.histograms['train'][0][sampled_idx]],
@@ -1047,7 +1052,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['graph_state_keep_prob']: 1,
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
                 self.placeholders['out_layer_dropout_keep_prob']: 1.0,
-                self.placeholders['max_iteration_num']: 1,
             }
 
     """
@@ -1063,7 +1067,6 @@ class MolGVAE(ChemModel):
                 self.placeholders['graph_state_keep_prob']: 1,
                 self.placeholders['edge_weight_dropout_keep_prob']: 1,
                 self.placeholders['out_layer_dropout_keep_prob']: 1.0,
-                self.placeholders['max_iteration_num']: 1,
                 self.placeholders['is_generative']: is_generative,
             }
 

@@ -114,10 +114,12 @@ class ChemModel(object):
                 self.make_train_step()
 
             # tensorboard
-            suffix = 'core' if self.params['suffix'] is None else self.params['suffix']
-            self.tb_writer_train = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + suffix + '/train/')
-            self.tb_writer_valid = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + suffix + '/valid/')
-            self.tb_writer_train.add_graph(self.graph)
+            if self.params['tensorboard'] is not None and self.params['generation'] == 0:
+                suffix = 'core' if self.params['suffix'] is None else self.params['suffix']
+                path_tb = self.params['dataset'] + '/' + suffix
+                self.tb_writer_train = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + path_tb + '/train/')
+                self.tb_writer_valid = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + path_tb + '/valid/')
+                self.tb_writer_train.add_graph(self.graph)
 
             # Restore/initialize variables:
             restore_file = args.get('--restore')
@@ -315,7 +317,6 @@ class ChemModel(object):
                                                                                  batch_data[self.placeholders['num_vertices']],
                                                                                  self.params['latent_space_size'])
             if is_training:
-                tb_writer = self.tb_writer_train
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']
                 fetch_list = [self.ops['loss'], self.ops['train_step'],
                               self.ops["edge_loss"], self.ops['kl_loss'],
@@ -325,14 +326,21 @@ class ChemModel(object):
                               self.ops['grads'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['grads2'],
                               self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
-                              self.ops['reconstruction'], self.ops['summary']]
+                              self.ops['reconstruction']]
             else:
-                tb_writer = self.tb_writer_valid
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], self.ops['mean_edge_loss'], self.ops['mean_node_symbol_loss'],
                               self.ops['mean_kl_loss'], self.ops['mean_total_qed_loss'], self.ops['sampled_atoms'],
                               self.ops['node_pred_error'], self.ops['edge_pred_error'], self.ops['edge_type_pred_error'],
-                              self.ops['reconstruction'], self.ops['summary']]
+                              self.ops['reconstruction']]
+            # tensorboard
+            if self.params['tensorboard'] is not None and self.params['generation'] == 0:
+                fetch_list = fetch_list.append(self.ops['summary'])
+                if is_training:
+                    tb_writer = self.tb_writer_train
+                else:
+                    tb_writer = self.tb_writer_valid
+
             result = self.sess.run(fetch_list, feed_dict=batch_data)
             batch_loss = result[0]
             loss += batch_loss * num_graphs
@@ -355,7 +363,8 @@ class ChemModel(object):
                 edge_type_pred_error += result[8] * num_graphs
                 reconstruction += result[9]
 
-            if self.params['tensorboard'] is not None:
+            # tensorboard
+            if self.params['tensorboard'] is not None and self.params['generation'] == 0:
                 freq = self.params['tensorboard']
                 tmp_limit = n_batches // freq
                 # print(n_batches, tmp_limit, step // tmp_limit, step % tmp_limit)

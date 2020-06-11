@@ -204,34 +204,43 @@ class MolGVAE(ChemModel):
 
         with tf.name_scope('distribution_vars'):
             # Weights final part encoder. They map all nodes in one point in the latent space
-            self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
-            self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
-            self.weights['logvariance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="logvariance_weights")
-            self.weights['logvariance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="logvariance_biases")
+            input_size_distribution = h_dim_en * (self.params['num_timesteps'] + 1)
+            self.weights['mean_MLP'] = MLP(input_size_distribution, ls_dim,
+                                           [],
+                                           self.placeholders['out_layer_dropout_keep_prob'],
+                                           activation_function=tf.nn.leaky_relu,
+                                           name='mean_MLP')
+            self.weights['logvariance_MLP'] = MLP(input_size_distribution, ls_dim,
+                                                  [],
+                                                  self.placeholders['out_layer_dropout_keep_prob'],
+                                                  activation_function=tf.nn.leaky_relu,
+                                                  name='logvariance_MLP')
+
 
         with tf.name_scope('gen_nodes_vars'):
             # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
             self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]), name='histogram_weights')
             self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32), name='histogram_bias')
             # The weights for generating nodel symbol logits
-            dim_node_features_weights = 1 * h_dim_de
-            # dim_node_features_weights = 3 * ls_dim + h_dim_en
-            self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]), name='node_symbol_weights0')
-            self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name='node_symbol_biases0')
-            self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim, self.params['num_symbols']]), name='node_symbol_weights')
-            self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32), name='node_symbol_biases')
+            self.weights['node_symbol_MLP'] = MLP(h_dim_de, self.params['num_symbols'],
+                                                  [ls_dim],
+                                                  self.placeholders['out_layer_dropout_keep_prob'],
+                                                  activation_function=tf.nn.leaky_relu,
+                                                  name='node_symbol_MLP')
 
         with tf.name_scope('gen_edges_vars'):
             # gen edges
-            dim_edge_features_weights = 4*(h_dim_en + h_dim_de)
-            self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]), name='edge_gen0')
-            self.weights['edge_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32), name='edge_gen_bias0')
-            self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, 1]), name='edge_gen')
-            self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32), name='edge_gen_bias')
-            self.weights['edge_type_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]), name='edge_type_gen0')
-            self.weights['edge_type_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32), name='edge_type_gen_bias0')
-            self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types]), name='edge_type_gen')
-            self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32), name='edge_type_gen_bias')
+            input_size_edge = 4*(h_dim_en + h_dim_de)
+            self.weights['edge_gen_MLP'] = MLP(input_size_edge, 1,
+                                               [h_dim_de],
+                                               self.placeholders['out_layer_dropout_keep_prob'],
+                                               activation_function=tf.nn.leaky_relu,
+                                               name='edge_gen_MLP')
+            self.weights['edge_type_gen_MLP'] = MLP(input_size_edge, self.num_edge_types,
+                                                    [h_dim_de],
+                                                    self.placeholders['out_layer_dropout_keep_prob'],
+                                                    activation_function=tf.nn.leaky_relu,
+                                                    name='edge_type_gen_MLP')
 
         with tf.name_scope('qed_vars'):
             # weights for linear projection on qed prediction input
@@ -362,8 +371,9 @@ class MolGVAE(ChemModel):
     def compute_mean_and_logvariance(self):
         h_dim = self.params['hidden_size_encoder']
         reshped_last_h = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
-        mean = tf.matmul(reshped_last_h, self.weights['mean_weights']) + self.weights['mean_biases']
-        logvariance = tf.matmul(reshped_last_h, self.weights['logvariance_weights']) + self.weights['logvariance_biases']
+        mean = self.weights['mean_MLP'](reshped_last_h)
+        logvariance = self.weights['logvariance_MLP'](reshped_last_h)
+
         self.ops['mean'] = mean
         self.ops['logvariance'] = logvariance
         tf.summary.histogram("mean", self.ops['mean'])
@@ -424,9 +434,7 @@ class MolGVAE(ChemModel):
         initial_nodes_decoder = tf.reshape(conc_z_hist, [batch_size, v, h_dim_de])
 
         # calc prob with or without mask
-        atom_logits = tf.nn.leaky_relu(
-            tf.matmul(conc_z_hist, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        atom_logits = tf.matmul(atom_logits, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
+        atom_logits = self.weights['node_symbol_MLP'](conc_z_hist)
         if self.params['use_mask']:
             flat_incr_node_mask = tf.reshape(self.placeholders['incr_node_mask'], [-1, num_symbols])
             atom_logits = tf.where(tf.reduce_sum(flat_incr_node_mask, 1) > 0,
@@ -518,12 +526,11 @@ class MolGVAE(ChemModel):
         hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
-        fx_logit = tf.nn.leaky_relu(tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
-        fx_logit = tf.squeeze(fx_logit)
+        atom_logits = self.weights['node_symbol_MLP'](new_z_concat)
+        atom_logits = tf.squeeze(atom_logits)
         if self.params['use_mask']:
-            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
-        node_probs = tf.nn.softmax(fx_logit)
+            atom_logits, mask = self.mask_mols(atom_logits, hist_diff_pos)
+        node_probs = tf.nn.softmax(atom_logits)
 
         # probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
         #                       lambda: self.placeholders['node_symbols'][idx_sample][idx_atom],
@@ -557,13 +564,11 @@ class MolGVAE(ChemModel):
             tf.matmul(exp, self.weights['histogram_weights']) + self.weights['histogram_bias'])
         new_z_concat = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
 
-        fx_logit = tf.nn.leaky_relu(
-            tf.matmul(new_z_concat, self.weights['node_symbol_weights0']) + self.weights['node_symbol_biases0'])
-        fx_logit = tf.matmul(fx_logit, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases']
-        fx_logit = tf.squeeze(fx_logit)
+        atom_logits = self.weights['node_symbol_MLP'](new_z_concat)
+        atom_logits = tf.squeeze(atom_logits)
         if self.params['use_mask']:
-            fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
-        node_probs = tf.nn.softmax(fx_logit)
+            atom_logits, mask = self.mask_mols(atom_logits, hist_diff_pos)
+        node_probs = tf.nn.softmax(atom_logits)
         s_atom = self.sample_atom(node_probs, False)
         new_updated_hist = self.update_hist(updated_hist, s_atom)
 
@@ -789,17 +794,13 @@ class MolGVAE(ChemModel):
 
         # edge prediction
         edge_rep = tf.reshape(input_features, [-1, dim_input_network])
-        #edge_pred_tmp = self.weights['edge_gen_mlp'](edge_rep)
-        edge_pred_tmp = tf.nn.leaky_relu(tf.matmul(edge_rep, self.weights['edge_gen0']) + self.weights['edge_gen_bias0'])
-        edge_pred_tmp = tf.matmul(edge_pred_tmp, self.weights['edge_gen']) + self.weights['edge_gen_bias']  # [b*v, num_edges + 1]
+        edge_pred_tmp = self.weights['edge_gen_MLP'](edge_rep)
         edge_pred_tmp = tf.nn.sigmoid(edge_pred_tmp)
         edge_pred_tmp = tf.reshape(edge_pred_tmp, [batch_size, v, 1]) * self.ops['graph_state_mask']
         edge_pred_tmp = tf.squeeze(edge_pred_tmp, axis=-1)
 
         # edge type prediction
-        edge_type_pred_tmp = tf.nn.leaky_relu(tf.matmul(edge_rep, self.weights['edge_type_gen0']) + self.weights['edge_type_gen_bias0'])
-        #edge_type_pred_tmp = self.weights['edge_type_gen_mlp'](edge_rep)
-        edge_type_pred_tmp = tf.matmul(edge_type_pred_tmp, self.weights['edge_type_gen']) + self.weights['edge_type_gen_bias']  # [b*v, num_edges + 1]
+        edge_type_pred_tmp = self.weights['edge_type_gen_MLP'](edge_rep)
         edge_type_pred_tmp = tf.nn.softmax(edge_type_pred_tmp + (mask * LARGE_NUMBER - LARGE_NUMBER))
         edge_type_pred_tmp = tf.reshape(edge_type_pred_tmp, [batch_size, v, self.num_edge_types]) * self.ops['graph_state_mask']
 

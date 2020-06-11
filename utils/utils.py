@@ -344,13 +344,17 @@ class ThreadedIterator:
 
 # Implements multilayer perceptron
 class MLP(object):
-    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu):
+    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu, name=None):
         self.in_size = in_size
         self.out_size = out_size
         self.hid_sizes = hid_sizes
         self.dropout_keep_prob = dropout_keep_prob
         self.activation_function = activation_function
-        self.params = self.make_network_params()
+        if name is not None:
+            with tf.name_scope(name):
+                self.params = self.make_network_params()
+        else:
+            self.params = self.make_network_params()
 
     def make_network_params(self):
         dims = [self.in_size] + self.hid_sizes + [self.out_size]

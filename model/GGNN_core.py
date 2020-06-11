@@ -91,7 +91,7 @@ class ChemModel(object):
         # A = number of atoms in a molecule, N = number of histograms
         # With filter we create a list of max(A) lists, which each list inside the main one are the weights for each histogram
         # according to the number of atoms
-        # 0 return the frequency, 1 return the prob
+        # 0 return the frequency, 1 return the probability
         self.histograms['filter'] = HM.v_filter(self.histograms['train'][0], self.histograms['train'][1], self.max_num_vertices)
         self.histograms['valid'] = self.prepareHist(valid_data)
         self.histograms['test'] = self.prepareHist(test_data)
@@ -110,7 +110,7 @@ class ChemModel(object):
 
             with tf.name_scope('model'):
                 self.make_model()
-            with tf.name_scope('tain_steps'):
+            with tf.name_scope('train_steps'):
                 self.make_train_step()
 
             # tensorboard
@@ -120,6 +120,7 @@ class ChemModel(object):
                 self.tb_writer_train = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + path_tb + '/train/')
                 self.tb_writer_valid = tf.summary.FileWriter(self.params['log_dir'] + '/log/' + path_tb + '/valid/')
                 self.tb_writer_train.add_graph(self.graph)
+            self.ops['summary'] = tf.summary.merge_all()
 
             # Restore/initialize variables:
             restore_file = args.get('--restore')
@@ -180,18 +181,10 @@ class ChemModel(object):
         raise Exception("Models have to implement process_raw_graphs!")
 
     def make_model(self):
-        self.placeholders['target_values'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None],
-                                                            name='target_values')
-        self.placeholders['target_mask'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None],
-                                                          name='target_mask')
-        self.placeholders['num_graphs'] = tf.placeholder(tf.int32, [], name='num_graphs')
-        self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
+        self.prepare_specific_graph_model()
+        initial_state = self.get_node_embedding_state(self.placeholders['node_symbols'])
 
-        with tf.variable_scope("graph_model"):
-            self.prepare_specific_graph_model()
-
-            initial_state = self.get_node_embedding_state(self.placeholders['node_symbols'])
-
+        with tf.name_scope('graph_convolution_op'):
             # This does the actual graph work:
             if self.params['use_graph']:
                 if self.params["residual_connection_on"]:
@@ -210,25 +203,25 @@ class ChemModel(object):
                 self.ops['final_node_representations'] = initial_state
 
         # Calculate p(z|x)'s mean and log variance
-        with tf.name_scope('get_distribution'):
+        with tf.name_scope('get_distribution_op'):
             self.compute_mean_and_logvariance()
 
         # Sample from a gaussian distribution according to the mean and log variance
-        with tf.name_scope('sample'):
+        with tf.name_scope('sampling_op'):
             self.sample_with_mean_and_logvariance()
 
         # obtains te latent representation of the nodes. This is the decoder's first part
         # it always use the NN function without teacher forcing
-        with tf.name_scope('gen_nodes'):
+        with tf.name_scope('gen_nodes_op'):
             self.construct_nodes()
 
         # Construct logit matrices for both edges and edge types. This is the decoder's second part
         # it uses teacher forcing in the training
-        with tf.name_scope('gen_edges'):
+        with tf.name_scope('gen_edges_op'):
             self.construct_logit_matrices()
 
         # Obtain losses for edges and edge types
-        with tf.name_scope('loss'):
+        with tf.name_scope('get_loss_op'):
             self.ops['qed_loss'] = []
             self.ops['loss'] = self.construct_loss()
 
@@ -251,20 +244,25 @@ class ChemModel(object):
         #     print(i[0])
 
         clipped_grads = []
-        for grad, var in grads_and_vars:
-            if grad is not None:
-                clipped_grads.append((tf.clip_by_norm(grad, self.params['clamp_gradient_norm']), var))
-            else:
-                clipped_grads.append((grad, var))
-        grads_for_display=[]
+        grads_for_display = []
         grads_for_display2 = []
         for grad, var in grads_and_vars:
+            tf.summary.histogram(var.name, var)
             if grad is not None:
-                grads_for_display.append((tf.clip_by_norm(grad, self.params['clamp_gradient_norm']), var))
+                tmp_grad = tf.clip_by_norm(grad, self.params['clamp_gradient_norm'])
+                clipped_grads.append((tmp_grad, var))
+                grads_for_display.append((tmp_grad, var))
                 grads_for_display2.append(grad)
+                tf.summary.histogram(var.name + '_grad_clip', tmp_grad)
+            else:
+                tmp_grad = grad
+                clipped_grads.append((tmp_grad, var))
+                tf.summary.histogram(var.name + '_grad_clip', 0)
+
         self.ops['grads']= grads_for_display
         self.ops['grads2'] = grads_for_display2
         self.ops['train_step'] = optimizer.apply_gradients(clipped_grads)
+
         # Initialize newly-introduced variables:
         self.sess.run(tf.local_variables_initializer())
 
@@ -452,7 +450,8 @@ class ChemModel(object):
                     log_entry = {
                         'Epoch': epoch,
                         'Time': epoch_time,
-                        'Train_results': (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec),
+                        'Train_results': (loss, mean_edge_loss, mean_node_loss, mean_kl_loss, mean_qed_loss, instance_per_sec,\
+                        node_pred_error, edge_pred_error, edge_type_pred_error, reconstruction),
                     }
                     log_to_save.append(log_entry)
 

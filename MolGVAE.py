@@ -61,11 +61,9 @@ class MolGVAE(ChemModel):
                                                                                 # zinc 8->8431Mb  13->14401
                         "qed_trade_off_lambda": 10,                             # originale 10
                         'prior_learning_rate': 0.05,
-                        'stop_criterion': 0.01,
                         'num_epochs': 1000 if dataset == 'zinc' else 1000,
                         'number_of_generation': 20000,
-                        'optimization_step': 0,      
-                        'maximum_distance': 50,
+                        'optimization_step': 0,
                         "use_argmax_nodes": False,                      # use random sampling or argmax during node sampling
                         "use_argmax_bonds": False,                      # use random sampling or argmax during bonds generations
                         'use_mask': False,                              # true to use node mask
@@ -93,10 +91,10 @@ class MolGVAE(ChemModel):
 
                         'train_file': 'data/molecules_train_%s.json' % dataset,
                         'valid_file': 'data/molecules_valid_%s.json' % dataset,
+                        # 'train_file': 'data/molecules_small_dataset.json',
+                        # 'valid_file': 'data/molecules_test_%s.json' % dataset,
                         'test_file': 'data/molecules_test_%s.json' % dataset,
 
-                        'try_different_starting': True,
-                        "num_different_starting": 6,
                         'generation': 0,                    # 0 = do training, 1 = do only gen, 2 = do only rec
                         'reconstruction_en': 20,            # number of encoding in reconstruction
                         'reconstruction_dn': 1,             # number of decoding in reconstruction
@@ -104,17 +102,10 @@ class MolGVAE(ChemModel):
                         'use_graph': False,                 # use gnn
                         'use_gin': True,                    # use gin as gnn
                         'gin_epsilon': 0,                   # gin epsilon
-                        "label_one_hot": False,             # one hot label or not
-                        "multi_bfs_path": False,            # whether sample several BFS paths for each molecule
-                        "bfs_path_count": 30,
                         "path_random_order": False,         # False: canonical order, True: random order
-                        "sample_transition": False,         # whether use transition sampling
                         'edge_weight_dropout_keep_prob': 1,
-                        'check_overlap_edge': False,
-                        "truncate_distance": 10,
                         "use_gpu": True,
                         "use_rec_multi_threads": True,
-                        "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
                         "loss_normalized_per_batch": False,
                         "fix_molecule_validation": True,
                         "tensorboard": 3,                   # frequency if we use tensorboard else None
@@ -130,6 +121,10 @@ class MolGVAE(ChemModel):
         expanded_h_dim = h_dim_de + h_dim_en + 1  # 1 for focus bit
         hist_dim = self.histograms['hist_dim']
 
+        self.placeholders['target_values'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None], name='target_values')
+        self.placeholders['target_mask'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None], name='target_mask')
+        self.placeholders['num_graphs'] = tf.placeholder(tf.int32, [], name='num_graphs')
+        self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
         self.placeholders['edge_weight_dropout_keep_prob'] = tf.placeholder(tf.float32, None, name='edge_weight_dropout_keep_prob')
         # mask out invalid node
@@ -154,115 +149,97 @@ class MolGVAE(ChemModel):
 
 
         # weights for encoder and decoder GNN.
-        if self.params['use_graph']:
-            if self.params["residual_connection_on"]:
-                # weights for encoder and decoder GNN. Different weights for each iteration
-                for scope in ['_encoder', '_decoder']:
+        with tf.name_scope('graph_convolution_vars'):
+            if self.params['use_graph']:
+                if self.params["residual_connection_on"]:
+                    # weights for encoder and decoder GNN. Different weights for each iteration
+                    for scope in ['_encoder', '_decoder']:
+                        if scope == '_encoder':
+                            new_h_dim = h_dim_en
+                        else:
+                            new_h_dim = expanded_h_dim
+                            # For each GNN iteration
+                        for iter_idx in range(self.params['num_timesteps']):
+                            with tf.variable_scope("gru_scope"+scope+str(iter_idx), reuse=False):
+                                self.weights['edge_weights'+scope+str(iter_idx)] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
+                                if self.params['use_edge_bias']:
+                                    self.weights['edge_biases'+scope+str(iter_idx)] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+
+                                cell = tf.contrib.rnn.GRUCell(new_h_dim)
+                                cell = tf.nn.rnn_cell.DropoutWrapper(cell, state_keep_prob=self.placeholders['graph_state_keep_prob'])
+                                self.weights['node_gru'+scope+str(iter_idx)] = cell
+                else:
+                    for scope in ['_encoder', '_decoder']:
+                        if scope == '_encoder':
+                            new_h_dim= h_dim_en
+                        else:
+                            new_h_dim=expanded_h_dim
+                        self.weights['edge_weights'+scope] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
+                        if self.params['use_edge_bias']:
+                            self.weights['edge_biases'+scope] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+                        with tf.variable_scope("gru_scope"+scope):
+                            cell = tf.contrib.rnn.GRUCell(new_h_dim)
+                            cell = tf.nn.rnn_cell.DropoutWrapper(cell,
+                                                                 state_keep_prob=self.placeholders['graph_state_keep_prob'])
+                            self.weights['node_gru'+scope] = cell
+            elif self.params['use_gin']:
+                self.weights['gin_epsilon'] = tf.constant(self.params['gin_epsilon'], tf.float32)
+                for scope in ['_encoder']:  # if needed you can add _decoder too
                     if scope == '_encoder':
                         new_h_dim = h_dim_en
                     else:
                         new_h_dim = expanded_h_dim
                         # For each GNN iteration
                     for iter_idx in range(self.params['num_timesteps']):
-                        with tf.variable_scope("gru_scope"+scope+str(iter_idx), reuse=False):
-                            self.weights['edge_weights'+scope+str(iter_idx)] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
+                        with tf.variable_scope("gin_scope" + scope + str(iter_idx), reuse=False):
+                            self.weights['edge_weights' + scope + str(iter_idx)] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]), name='edge_weights')
                             if self.params['use_edge_bias']:
-                                self.weights['edge_biases'+scope+str(iter_idx)] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
+                                self.weights['edge_biases' + scope + str(iter_idx)] = tf.Variable(
+                                    np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32), name='edge_weights_bias')
+                            self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
+                                                                              new_h_dim,
+                                                                              [new_h_dim, new_h_dim],
+                                                                              self.placeholders['out_layer_dropout_keep_prob'],
+                                                                              activation_function=tf.nn.leaky_relu)
 
-                            cell = tf.contrib.rnn.GRUCell(new_h_dim)
-                            cell = tf.nn.rnn_cell.DropoutWrapper(cell, state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                            self.weights['node_gru'+scope+str(iter_idx)] = cell
-            else:
-                for scope in ['_encoder', '_decoder']:
-                    if scope == '_encoder':
-                        new_h_dim= h_dim_en
-                    else:
-                        new_h_dim=expanded_h_dim
-                    self.weights['edge_weights'+scope] = tf.Variable(glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
-                    if self.params['use_edge_bias']:
-                        self.weights['edge_biases'+scope] = tf.Variable(np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
-                    with tf.variable_scope("gru_scope"+scope):
-                        cell = tf.contrib.rnn.GRUCell(new_h_dim)
-                        cell = tf.nn.rnn_cell.DropoutWrapper(cell,
-                                                             state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                        self.weights['node_gru'+scope] = cell
-        elif self.params['use_gin']:
-            self.weights['gin_epsilon'] = tf.constant(self.params['gin_epsilon'], tf.float32)
-            for scope in ['_encoder', '_decoder']:
-                if scope == '_encoder':
-                    new_h_dim = h_dim_en
-                else:
-                    new_h_dim = expanded_h_dim
-                    # For each GNN iteration
-                for iter_idx in range(self.params['num_timesteps']):
-                    with tf.variable_scope("gin_scope" + scope + str(iter_idx), reuse=False):
-                        self.weights['edge_weights' + scope + str(iter_idx)] = tf.Variable(
-                            glorot_init([self.num_edge_types, new_h_dim, new_h_dim]))
-                        if self.params['use_edge_bias']:
-                            self.weights['edge_biases' + scope + str(iter_idx)] = tf.Variable(
-                                np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32))
-                        self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
-                                                                      new_h_dim,
-                                                                      [new_h_dim, new_h_dim],
-                                                                      self.placeholders['out_layer_dropout_keep_prob'],
-                                                                          activation_function=tf.nn.leaky_relu)
+        with tf.name_scope('distribution_vars'):
+            # Weights final part encoder. They map all nodes in one point in the latent space
+            self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
+            self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
+            self.weights['logvariance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="logvariance_weights")
+            self.weights['logvariance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="logvariance_biases")
 
+        with tf.name_scope('gen_nodes_vars'):
+            # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
+            self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]), name='histogram_weights')
+            self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32), name='histogram_bias')
+            # The weights for generating nodel symbol logits
+            dim_node_features_weights = 1 * h_dim_de
+            # dim_node_features_weights = 3 * ls_dim + h_dim_en
+            self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]), name='node_symbol_weights0')
+            self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name='node_symbol_biases0')
+            self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim, self.params['num_symbols']]), name='node_symbol_weights')
+            self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32), name='node_symbol_biases')
 
-        # Weights final part encoder. They map all nodes in one point in the latent space
-        self.weights['mean_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="mean_weights")
-        self.weights['mean_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="mean_biases")
-        self.weights['variance_weights'] = tf.Variable(glorot_init([h_dim_en * (self.params['num_timesteps'] + 1), ls_dim]), name="variance_weights")
-        self.weights['variance_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name="variance_biases")
+        with tf.name_scope('gen_edges_vars'):
+            # gen edges
+            dim_edge_features_weights = 4*(h_dim_en + h_dim_de)
+            self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]), name='edge_gen0')
+            self.weights['edge_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32), name='edge_gen_bias0')
+            self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, 1]), name='edge_gen')
+            self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32), name='edge_gen_bias')
+            self.weights['edge_type_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]), name='edge_type_gen0')
+            self.weights['edge_type_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32), name='edge_type_gen_bias0')
+            self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types]), name='edge_type_gen')
+            self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32), name='edge_type_gen_bias')
 
-        # self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
-        self.weights['histogram_weights'] = tf.Variable(glorot_init([ls_dim + 2*hist_dim, 100]))
-        self.weights['histogram_bias'] = tf.Variable(np.zeros([1, 100]).astype(np.float32))
+        with tf.name_scope('qed_vars'):
+            # weights for linear projection on qed prediction input
+            self.weights['qed_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim]), name='qed_weights')
+            self.weights['qed_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32), name='qed_biases')
 
-        # The weights for generating nodel symbol logits
-        dim_node_features_weights = 1 * h_dim_de
-        # dim_node_features_weights = 3 * ls_dim + h_dim_en
-        self.weights['node_symbol_weights0'] = tf.Variable(glorot_init([dim_node_features_weights, ls_dim]))
-        self.weights['node_symbol_biases0'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
-        self.weights['node_symbol_weights'] = tf.Variable(glorot_init([ls_dim, self.params['num_symbols']]))
-        self.weights['node_symbol_biases'] = tf.Variable(np.zeros([1, self.params['num_symbols']]).astype(np.float32))
-
-
-        # gen edges
-        dim_edge_features_weights = 4*(h_dim_en + h_dim_de)
-        #self.weights['edge_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]))
-        self.weights['edge_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
-        self.weights['edge_gen'] = tf.Variable(glorot_init([h_dim_de, 1]))
-        self.weights['edge_gen_bias'] = tf.Variable(np.zeros([1, 1]).astype(np.float32))
-        # self.weights['edge_type_gen_mlp'] = MLP(dim_features_weights, h_dim_de, [dim_features_weights], self.placeholders['out_layer_dropout_keep_prob'])
-        self.weights['edge_type_gen0'] = tf.Variable(glorot_init([dim_edge_features_weights, h_dim_de]))
-        self.weights['edge_type_gen_bias0'] = tf.Variable(np.zeros([1, h_dim_de]).astype(np.float32))
-        self.weights['edge_type_gen'] = tf.Variable(glorot_init([h_dim_de, self.num_edge_types]))
-        self.weights['edge_type_gen_bias'] = tf.Variable(np.zeros([1, self.num_edge_types]).astype(np.float32))
-
-        feature_dimension = 6 * expanded_h_dim
-        # record the total number of features
-        self.params["feature_dimension"] = 6
-        # weights for generating edge type logits
-        for i in range(self.num_edge_types):
-            self.weights['edge_type_%d' % i] = tf.Variable(glorot_init([feature_dimension, feature_dimension]))
-            self.weights['edge_type_biases_%d' % i] = tf.Variable(np.zeros([1, feature_dimension]).astype(np.float32))
-            self.weights['edge_type_output_%d' % i] = tf.Variable(glorot_init([feature_dimension, 1]))
-        # weights for generating edge logits
-        self.weights['edge_iteration'] = tf.Variable(glorot_init([feature_dimension, feature_dimension]))
-        self.weights['edge_iteration_biases'] = tf.Variable(np.zeros([1, feature_dimension]).astype(np.float32))
-        self.weights['edge_iteration_output'] = tf.Variable(glorot_init([feature_dimension, 1]))
-        # Weights for the stop node
-        self.weights["stop_node"] = tf.Variable(glorot_init([1, expanded_h_dim]))
-        # Weight for distance embedding
-        self.weights['distance_embedding'] = tf.Variable(glorot_init([self.params['maximum_distance'], expanded_h_dim]))
-        # Weight for overlapped edge feature
-        self.weights["overlapped_edge_weight"] = tf.Variable(glorot_init([2, expanded_h_dim]))
-        # weights for linear projection on qed prediction input
-        self.weights['qed_weights'] = tf.Variable(glorot_init([ls_dim, ls_dim]))
-        self.weights['qed_biases'] = tf.Variable(np.zeros([1, ls_dim]).astype(np.float32))
         # use node embeddings
-        self.weights["node_embedding"] = tf.Variable(glorot_init([self.params["num_symbols"], h_dim_en]))
+        self.weights["node_embedding"] = tf.Variable(glorot_init([self.params["num_symbols"], h_dim_en]), name='node_embedding')
         
         # graph state mask
         self.ops['graph_state_mask'] = tf.expand_dims(self.placeholders['node_mask'], 2)
@@ -361,6 +338,8 @@ class MolGVAE(ChemModel):
                     m = tf.matmul(h, self.weights['edge_weights'+scope_name+str(iter_idx)][edge_type])  # [b*v, h]
                     if self.params['use_edge_bias']:
                         m += self.weights['edge_biases'+scope_name+str(iter_idx)][edge_type]            # [b, v, h]
+                    # apply non linearity
+                    m = tf.nn.leaky_relu(m)
                     m = tf.reshape(m, [-1, v, h_dim])                                                   # [b, v, h]
                     # collect the messages from other vertices to each vertice
                     if edge_type == 0:
@@ -370,19 +349,26 @@ class MolGVAE(ChemModel):
                 # all messages collected for each node
                 acts = tf.reshape(acts, [-1, h_dim])                                                    # [b*v, h]
                 input = tf.multiply((1 + self.weights['gin_epsilon']), h) + acts
-                h = self.weights['mlp' + scope_name + str(iter_idx)](input)
+                h = tf.nn.leaky_relu(self.weights['mlp' + scope_name + str(iter_idx)](input))
+                # tensorboard
+                tf.summary.histogram("gin_scope"+scope_name+str(iter_idx) + "_node_state", h)
                 weigths_concat = tf.concat([weigths_concat, h], axis=1)
         last_h = tf.reshape(h, [-1, v, h_dim])
-        lats_weigths_concat = tf.reshape(weigths_concat, [-1, v, h_dim * (self.params['num_timesteps'] + 1)])
-        return last_h, lats_weigths_concat
+        last_weigths_concat = tf.reshape(weigths_concat, [-1, v, h_dim * (self.params['num_timesteps'] + 1)])
+        # tensorboard
+        tf.summary.histogram("last_weigths_concat", last_weigths_concat)
+        return last_h, last_weigths_concat
 
     def compute_mean_and_logvariance(self):
         h_dim = self.params['hidden_size_encoder']
         reshped_last_h = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
         mean = tf.matmul(reshped_last_h, self.weights['mean_weights']) + self.weights['mean_biases']
-        logvariance = tf.matmul(reshped_last_h, self.weights['variance_weights']) + self.weights['variance_biases']
+        logvariance = tf.matmul(reshped_last_h, self.weights['logvariance_weights']) + self.weights['logvariance_biases']
         self.ops['mean'] = mean
         self.ops['logvariance'] = logvariance
+        tf.summary.histogram("mean", self.ops['mean'])
+        tf.summary.histogram("logvariance", self.ops['logvariance'])
+        tf.summary.histogram("variance", tf.exp(self.ops['logvariance']))
 
     def sample_with_mean_and_logvariance(self):
         v = self.placeholders['num_vertices']
@@ -416,6 +402,9 @@ class MolGVAE(ChemModel):
         self.ops['latent_node_symbols'] = tf.one_hot(self.ops['sampled_atoms'],
                                                      self.params['num_symbols'],
                                                      name='latent_node_symbols') * self.ops['graph_state_mask']
+
+        tf.summary.histogram("initial_nodes_decoder", self.ops['initial_nodes_decoder'])
+        tf.summary.histogram("sampled_atoms", self.ops['sampled_atoms'])
 
     def train_procedure(self):
         h_dim_de = self.params['hidden_size_decoder']
@@ -832,7 +821,6 @@ class MolGVAE(ChemModel):
         ls_dim = self.params['latent_space_size']
         kl_trade_off_lambda =self.placeholders['kl_trade_off_lambda']
         # Edge loss
-        # self.ops["edge_loss"] = tf.reduce_sum(self.ops['cross_entropy_losses'] * self.placeholders['iteration_mask'], axis=1)
         self.ops["edge_loss"] = self.ops['cross_entropy_losses']
         # KL loss
         kl_loss = 1 + self.ops['logvariance'] - tf.square(self.ops['mean']) - tf.exp(self.ops['logvariance'])
@@ -842,23 +830,10 @@ class MolGVAE(ChemModel):
         self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) *
                                                       self.placeholders['node_symbols'], axis=[1, 2])
 
-        if self.params['use_set_losses']:
-            # first version
-            # iou_values = self.IoU(self.ops['latent_node_symbols'], self.placeholders['node_symbols'])
-            # selection = tf.one_hot(tf.argmax(self.ops['node_symbol_prob'], 2), self.params['num_symbols'],
-            #           name='latent_node_symbols') * self.ops['graph_state_mask']
-            #iou_values = self.IoU(tf.cast(selection, tf.float32), self.placeholders['node_symbols'])
-            # self.ops['node_symbol_loss'] = self.ops['node_symbol_loss'] * (1 - iou_values)
-            # second version
-            self.ops['node_symbol_loss'] = 1 - self.IoU(self.ops['node_symbol_prob'], self.placeholders['node_symbols'])
-
-
-
         latent_node_symbol = tf.cast(tf.not_equal(tf.argmax(self.ops['latent_node_symbols'], axis=-1),
                                           tf.argmax(self.placeholders['node_symbols'], axis=-1)),
                                      tf.float32)
         mols_errors = self.ops['edge_pred_error'] + self.ops['edge_type_pred_error'] + tf.reduce_sum(latent_node_symbol, axis= -1)
-        # mols_errors = tf.Print(mols_errors, [mols_errors], message="mols_errors", summarize=1000)  # TODO: pr
         self.ops['reconstruction'] = tf.reduce_sum(tf.cast(tf.equal(mols_errors, 0), tf.float32))
         # after because it rewrite the operations
         self.ops['node_pred_error'] = tf.reduce_mean(latent_node_symbol)
@@ -905,8 +880,6 @@ class MolGVAE(ChemModel):
                               kl_trade_off_lambda *self.ops['kl_loss'])\
                               + self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
         # tf summary
-        tf.summary.histogram("mean", self.ops['mean'])
-        tf.summary.histogram("logvariance", self.ops['logvariance'])
         tf.summary.scalar('total_qed_loss', self.ops['total_qed_loss'])
         tf.summary.scalar('mean_edge_loss', self.ops['mean_edge_loss'])
         tf.summary.scalar('mean_node_symbol_loss', self.ops['mean_node_symbol_loss'])
@@ -917,13 +890,6 @@ class MolGVAE(ChemModel):
         tf.summary.scalar('node_pred_error', self.ops['node_pred_error'])
         tf.summary.scalar('edge_pred_error', self.ops['edge_pred_error'])
         tf.summary.scalar('edge_type_pred_error', self.ops['edge_type_pred_error'])
-
-        tf.summary.histogram("final_node_representations", self.ops['final_node_representations'][1])
-        tf.summary.histogram('node_embedding_weights', self.weights['node_embedding'])
-        tf.summary.histogram('edge_gen0', self.weights['edge_gen0'])
-        tf.summary.histogram('edge_gen', self.weights['edge_gen'])
-
-        self.ops['summary'] = tf.summary.merge_all()
 
         return loss
 
@@ -1035,14 +1001,16 @@ class MolGVAE(ChemModel):
         if incre_adj_mat is None:
             latent_node_symbol = np.zeros((1, 1, self.params["num_symbols"]))
 
-        prob = self.histograms['filter'][1][int(num_vertices)]
-        values = self.histograms['filter'][0][int(num_vertices)]
-        prob_sum = np.sum(prob)
+        hist_prob_per_num_atoms = self.histograms['filter'][1][int(num_vertices)]
+        hist_freq_per_num_atoms = self.histograms['filter'][0][int(num_vertices)]
+        prob_sum = np.sum(hist_prob_per_num_atoms)
+        # if there are no histograms with the same number (or higher) of atoms, we use all the histograms
+        #   otherwise we give only the histograms with at least the same number fo atoms
         if prob_sum == 0:
             sampled_idx = np.random.choice(len(self.histograms['train'][0]))
-            values = self.histograms['train'][1]
+            hist_freq_per_num_atoms = self.histograms['train'][1]
         else:
-            sampled_idx = np.random.choice(len(self.histograms['train'][0]), p=prob)
+            sampled_idx = np.random.choice(len(self.histograms['train'][0]), p=hist_prob_per_num_atoms)
         return {
             self.placeholders['z_prior']: random_normal_states, # [1, v, h]
             self.placeholders['num_vertices']: num_vertices,  # v
@@ -1054,7 +1022,7 @@ class MolGVAE(ChemModel):
             self.placeholders['edge_weight_dropout_keep_prob']: 1,
             self.placeholders['out_layer_dropout_keep_prob']: 1.0,
             self.placeholders['histograms']: self.histograms['train'][0],
-            self.placeholders['n_histograms']: values,
+            self.placeholders['n_histograms']: hist_freq_per_num_atoms,
             self.placeholders['hist']: [self.histograms['train'][0][sampled_idx]],
         }
 
@@ -1267,7 +1235,7 @@ class MolGVAE(ChemModel):
         # shuffle the lengths
         np.random.shuffle(bucket_at_step)
         for step in range(len(bucket_at_step)):
-            bucket = bucket_at_step[step] # bucket number
+            bucket = bucket_at_step[step]  # bucket number
             # data index
             start_idx = bucket_counters[bucket] * self.params['batch_size']
             end_idx = (bucket_counters[bucket] + 1) * self.params['batch_size']
@@ -1293,7 +1261,7 @@ class MolGVAE(ChemModel):
             # take latent from the input encoding or from prior
             random_normal_states = generate_std_normal(1, num_vertices, self.params['latent_space_size'])  # [1, h]
             # is generative is always false here due to the sampling in the latent space
-            feed_dict = self.get_dynamic_mean_feed_dict(elements, num_vertices, random_normal_states)  # always false
+            feed_dict = self.get_dynamic_mean_feed_dict(elements, num_vertices, random_normal_states)
             # get the latent point according to the encoder distribution
             fetch_list = [self.ops['z_sampled']]
             [latent_point] = self.sess.run(fetch_list, feed_dict=feed_dict)
@@ -1304,7 +1272,7 @@ class MolGVAE(ChemModel):
             for n_dn in range(self.params['reconstruction_dn']):
                 # Get back node symbol predictions
                 # Prepare dict
-                node_symbol_batch_feed_dict = self.get_dynamic_nodes_feed_dict(elements, num_vertices, latent_point)  # always false here
+                node_symbol_batch_feed_dict = self.get_dynamic_nodes_feed_dict(elements, num_vertices, latent_point)
                 # Get predicted node probabilities
                 [latent_nodes, predicted_node_symbol_prob, real_values] = self.get_node_symbol(node_symbol_batch_feed_dict)
                 # Node numbers for each graph

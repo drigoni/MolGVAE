@@ -342,7 +342,6 @@ class ThreadedIterator:
         self.__thread.join()
 
 
-# Implements multilayer perceptron
 class MLP(object):
     def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu, name=None):
         self.in_size = in_size
@@ -378,6 +377,47 @@ class MLP(object):
         acts = inputs
         for W, b in zip(self.params["weights"], self.params["biases"]):
             hid = tf.matmul(acts, tf.nn.dropout(W, self.dropout_keep_prob)) + b
+            acts = self.activation_function(hid)
+        last_hidden = hid
+        return last_hidden
+
+class MLP_norm(object):
+    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu, name=None, batch_norm=False):
+        self.in_size = in_size
+        self.out_size = out_size
+        self.hid_sizes = hid_sizes
+        self.dropout_keep_prob = dropout_keep_prob
+        self.activation_function = activation_function
+        self.batch_norm = batch_norm
+        if name is not None:
+            with tf.name_scope(name):
+                self.params = self.make_network_params()
+        else:
+            self.params = self.make_network_params()
+
+    def make_network_params(self):
+        dims = [self.in_size] + self.hid_sizes + [self.out_size]
+        weight_sizes = list(zip(dims[:-1], dims[1:]))
+        weights = [tf.Variable(self.init_weights(s), name='MLP_W_layer%i' % i)
+                   for (i, s) in enumerate(weight_sizes)]
+        biases = [tf.Variable(np.zeros(s[-1]).astype(np.float32), name='MLP_b_layer%i' % i)
+                  for (i, s) in enumerate(weight_sizes)]
+        network_params = {
+            "weights": weights,
+            "biases": biases,
+        }
+
+        return network_params
+
+    def init_weights(self, shape):
+        return np.sqrt(6.0 / (shape[-2] + shape[-1])) * (2 * np.random.rand(*shape).astype(np.float32) - 1)
+
+    def __call__(self, inputs, is_training):
+        acts = inputs
+        for W, b in zip(self.params["weights"], self.params["biases"]):
+            hid = tf.matmul(acts, tf.nn.dropout(W, self.dropout_keep_prob)) + b
+            if self.batch_norm:
+                hid = tf.layers.batch_normalization(hid, axis=-1, training=is_training)
             acts = self.activation_function(hid)
         last_hidden = hid
         return last_hidden

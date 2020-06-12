@@ -227,6 +227,7 @@ class ChemModel(object):
 
     def make_train_step(self):
         trainable_vars = self.sess.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+        update_vars = self.sess.graph.get_collection(tf.GraphKeys.UPDATE_OPS)
         if self.args.get('--freeze-graph-model'):
             graph_vars = set(self.sess.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="graph_model"))
             filtered_vars = []
@@ -238,7 +239,8 @@ class ChemModel(object):
             trainable_vars = filtered_vars
 
         optimizer = tf.train.AdamOptimizer(self.params['learning_rate'])
-        grads_and_vars = optimizer.compute_gradients(self.ops['loss'], var_list=trainable_vars)
+        with tf.control_dependencies(update_vars):
+            grads_and_vars = optimizer.compute_gradients(self.ops['loss'], var_list=trainable_vars)
 
         # for i in grads_and_vars:
         #     print(i[0])
@@ -311,6 +313,7 @@ class ChemModel(object):
             batch_data[self.placeholders['z_prior']] = utils.generate_std_normal(self.params['batch_size'],
                                                                                  batch_data[self.placeholders['num_vertices']],
                                                                                  self.params['latent_space_size'])
+            batch_data[self.placeholders['is_training']] = True
             if is_training:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']
                 fetch_list = [self.ops['loss'], self.ops['train_step'],

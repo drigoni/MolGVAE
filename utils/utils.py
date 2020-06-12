@@ -29,17 +29,24 @@ number_to_bond = {0: Chem.rdchem.BondType.SINGLE, 1: Chem.rdchem.BondType.DOUBLE
 
 def dataset_info(dataset):
     if dataset == 'qm9':
-        return {'atom_types': ["H", "C", "N", "O", "F"],
+        values={'atom_types': ["H", "C", "N", "O", "F"],
                 'maximum_valence': {0: 1, 1: 4, 2: 3, 3: 2, 4: 1},
                 'hist_dim': 4,
                 'max_valence_value': 9,
                 'max_n_atoms': 30,
                 'number_to_atom': {0: "H", 1: "C", 2: "N", 3: "O", 4: "F"},
                 'bucket_sizes': np.array(list(range(4, 28, 2)) + [29]),
-                'loss_edge_weights': [6787404, 1882538,  223084,   63896]
+                'n_edges': [6788282, 1883788, 222444, 63914],
+                'n_nodes': [0, 729895, 120522, 161809, 2828],
                }
+        values['loss_node_weights'] = [max(values['n_nodes']) / i if i > 0 else 1
+                                       for i in values['n_nodes']]
+        edges_to_consider = values['n_edges'][1:]  # the first position represent the non-present edges
+        values['loss_edge_weights'] = [max(edges_to_consider) / i if i > 0 else 1
+                                       for i in edges_to_consider]
+        return values
     elif dataset == 'zinc':
-        return {'atom_types': ['Br1(0)', 'C4(0)', 'Cl1(0)', 'F1(0)', 'H1(0)', 'I1(0)', 'N2(-1)', 'N3(0)', 'N4(1)', 'O1(-1)',
+        values={'atom_types': ['Br1(0)', 'C4(0)', 'Cl1(0)', 'F1(0)', 'H1(0)', 'I1(0)', 'N2(-1)', 'N3(0)', 'N4(1)', 'O1(-1)',
                                'O2(0)', 'S2(0)', 'S4(0)', 'S6(0)'],
                 'maximum_valence': {0: 1, 1: 4, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 3, 8: 4, 9: 1, 10: 2, 11: 2, 12: 4, 13: 6},
                 'hist_dim': 6,
@@ -50,10 +57,16 @@ def dataset_info(dataset):
                                    11: 'S', 12: 'S', 13: 'S'},
                 'bucket_sizes': np.array([28, 31, 33, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 53, 55, 58,
                                           84]),
-                # 'loss_edge_weights': [111623688, 3657738, 3657738, 3657739] this version help only the type of the edge
-                # 'loss_edge_weights': [3657738, 3657738, 3657738, 3657739]
-                'loss_edge_weights': [111623688, 8153922, 2791900, 27394]  #the right one
+                'n_edges': [111623688, 8153922, 2791900, 27394],
+                'n_nodes': [11251, 3758488, 37721, 70303, 0, 799, 1337, 553583, 67890, 21442,
+                            487609, 63815, 1980, 24630],
                }
+        values['loss_node_weights'] = [max(values['n_nodes']) / i if i > 0 else 1
+                                       for i in values['n_nodes']]
+        edges_to_consider = values['n_edges'][1:]       # the first position represent the non-present edges
+        values['loss_edge_weights'] = [max(edges_to_consider) / i if i > 0 else 1
+                                       for i in edges_to_consider]
+        return values
     else:
         print("Error: The datasets that you could use are QM9 or ZINC, not " + str(dataset))
         exit(1)
@@ -373,7 +386,7 @@ class MLP(object):
     def init_weights(self, shape):
         return np.sqrt(6.0 / (shape[-2] + shape[-1])) * (2 * np.random.rand(*shape).astype(np.float32) - 1)
 
-    def __call__(self, inputs):
+    def __call__(self, inputs, is_training=False):
         acts = inputs
         for W, b in zip(self.params["weights"], self.params["biases"]):
             hid = tf.matmul(acts, tf.nn.dropout(W, self.dropout_keep_prob)) + b
@@ -382,13 +395,12 @@ class MLP(object):
         return last_hidden
 
 class MLP_norm(object):
-    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu, name=None, batch_norm=False):
+    def __init__(self, in_size, out_size, hid_sizes, dropout_keep_prob, activation_function=tf.nn.relu, name=None):
         self.in_size = in_size
         self.out_size = out_size
         self.hid_sizes = hid_sizes
         self.dropout_keep_prob = dropout_keep_prob
         self.activation_function = activation_function
-        self.batch_norm = batch_norm
         if name is not None:
             with tf.name_scope(name):
                 self.params = self.make_network_params()
@@ -416,10 +428,9 @@ class MLP_norm(object):
         acts = inputs
         for W, b in zip(self.params["weights"], self.params["biases"]):
             hid = tf.matmul(acts, tf.nn.dropout(W, self.dropout_keep_prob)) + b
-            if self.batch_norm:
-                hid = tf.layers.batch_normalization(hid, axis=-1, training=is_training)
-            acts = self.activation_function(hid)
-        last_hidden = hid
+            hid_norm = tf.layers.batch_normalization(hid, axis=-1, training=is_training)
+            acts = self.activation_function(hid_norm)
+        last_hidden = hid_norm
         return last_hidden
 
 

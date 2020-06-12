@@ -105,7 +105,6 @@ class MolGVAE(ChemModel):
                         'edge_weight_dropout_keep_prob': 1,
                         "use_gpu": True,
                         "use_rec_multi_threads": True,
-                        "loss_normalized_per_batch": False,
                         "fix_molecule_validation": True,
                         "tensorboard": 3,                   # frequency if we use tensorboard else None
                         })
@@ -196,7 +195,7 @@ class MolGVAE(ChemModel):
                             if self.params['use_edge_bias']:
                                 self.weights['edge_biases' + scope + str(iter_idx)] = tf.Variable(
                                     np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32), name='edge_weights_bias')
-                            self.weights['mlp' + scope + str(iter_idx)] = MLP_norm(new_h_dim,
+                            self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
                                                                               new_h_dim,
                                                                               [new_h_dim, new_h_dim],
                                                                               self.placeholders['out_layer_dropout_keep_prob'],
@@ -205,12 +204,12 @@ class MolGVAE(ChemModel):
         with tf.name_scope('distribution_vars'):
             # Weights final part encoder. They map all nodes in one point in the latent space
             input_size_distribution = h_dim_en * (self.params['num_timesteps'] + 1)
-            self.weights['mean_MLP'] = MLP_norm(input_size_distribution, ls_dim,
+            self.weights['mean_MLP'] = MLP(input_size_distribution, ls_dim,
                                            [input_size_distribution],
                                            self.placeholders['out_layer_dropout_keep_prob'],
                                            activation_function=tf.nn.leaky_relu,
                                            name='mean_MLP')
-            self.weights['logvariance_MLP'] = MLP_norm(input_size_distribution, ls_dim,
+            self.weights['logvariance_MLP'] = MLP(input_size_distribution, ls_dim,
                                                   [input_size_distribution],
                                                   self.placeholders['out_layer_dropout_keep_prob'],
                                                   activation_function=tf.nn.leaky_relu,
@@ -218,13 +217,13 @@ class MolGVAE(ChemModel):
 
 
         with tf.name_scope('gen_nodes_vars'):
-            self.weights['histogram_MLP'] = MLP_norm(ls_dim + 2*hist_dim, 100,
+            self.weights['histogram_MLP'] = MLP(ls_dim + 2*hist_dim, 100,
                                                [],
                                                self.placeholders['out_layer_dropout_keep_prob'],
                                                activation_function=tf.nn.leaky_relu,
                                                name='histogram_MLP')
             # The weights for generating nodel symbol logits
-            self.weights['node_symbol_MLP'] = MLP_norm(h_dim_de, self.params['num_symbols'],
+            self.weights['node_symbol_MLP'] = MLP(h_dim_de, self.params['num_symbols'],
                                                   [h_dim_de, h_dim_de],
                                                   self.placeholders['out_layer_dropout_keep_prob'],
                                                   activation_function=tf.nn.leaky_relu,
@@ -233,12 +232,12 @@ class MolGVAE(ChemModel):
         with tf.name_scope('gen_edges_vars'):
             # gen edges
             input_size_edge = 4*(h_dim_en + h_dim_de)
-            self.weights['edge_gen_MLP'] = MLP_norm(input_size_edge, 1,
+            self.weights['edge_gen_MLP'] = MLP(input_size_edge, 1,
                                                [input_size_edge, h_dim_de],
                                                self.placeholders['out_layer_dropout_keep_prob'],
                                                activation_function=tf.nn.leaky_relu,
                                                name='edge_gen_MLP')
-            self.weights['edge_type_gen_MLP'] = MLP_norm(input_size_edge, self.num_edge_types,
+            self.weights['edge_type_gen_MLP'] = MLP(input_size_edge, self.num_edge_types,
                                                     [h_dim_de],
                                                     self.placeholders['out_layer_dropout_keep_prob'],
                                                     activation_function=tf.nn.leaky_relu,
@@ -693,45 +692,21 @@ class MolGVAE(ChemModel):
         gt_edges_type_pred = self.placeholders['adjacency_matrix']
         # gt = tf.Print(gt, [gt[0,:,0,0]], message="adj", summarize=1000)  # TODO: pr
 
-        if self.params['loss_normalized_per_batch']:
-            # binary cross-entropy balanced
-            n_yes_edges = tf.reduce_sum(gt_edges_pred)
-            n_no_edges = tf.reduce_sum(1 - gt_edges_pred)
-            edge_loss =- tf.reduce_sum((tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred)*(n_no_edges/n_yes_edges) +
-                                       tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1-gt_edges_pred),
-                                       axis=[1, 2])
 
-            # edge type cross entropy balanced
-            loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred, axis=[2, 3])
-            edge_type_loss = loss_batchEdge[:, 0]
-            n_type_1_edge = tf.reduce_sum(gt_edges_type_pred[:, 0, :, :])
-            for i in range(1, self.num_edge_types):
-                sum_tmp = tf.reduce_sum(gt_edges_type_pred[:, i, :, :])
-                sum_tmp = tf.where(sum_tmp > 0, sum_tmp, n_type_1_edge)
-                weights_temp = n_type_1_edge / sum_tmp
-                edge_type_loss += loss_batchEdge[:, i] * weights_temp
-            edge_type_loss = - edge_type_loss
-        else:
-            # binary cross-entropy balanced
-            edge_weights = dataset_info(self.params['dataset'])['loss_edge_weights']
-            n_yes_edges = np.sum(edge_weights[1:])
-            n_no_edges = edge_weights[0]
-            edge_loss = - tf.reduce_sum(
-                (tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred) * (n_no_edges / n_yes_edges) +
-                tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1 - gt_edges_pred),
-                axis=[1, 2])
+        # binary cross-entropy balanced
+        n_edges = dataset_info(self.params['dataset'])['n_edges']
+        n_yes_edges = np.sum(n_edges[1:])
+        n_no_edges = n_edges[0]
+        edge_loss = - tf.reduce_sum(
+            (tf.log(self.ops['edges_pred'] + SMALL_NUMBER) * gt_edges_pred) * (n_no_edges / n_yes_edges) +
+            tf.log((1 - self.ops['edges_pred']) + SMALL_NUMBER) * (1 - gt_edges_pred),
+            axis=[1, 2])
 
-            # edge type cross entropy balanced
-            loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred,
-                                           axis=[2, 3])
-            edge_type_loss = loss_batchEdge[:, 0]
-            n_type_1_edge = edge_weights[1]
-            for i in range(2, self.num_edge_types+1):
-                n_type_i = edge_weights[i]
-                n_type_i = n_type_i if n_type_i > 0 else n_type_1_edge
-                weights_temp = n_type_1_edge / n_type_i
-                edge_type_loss += loss_batchEdge[:, i-1] * weights_temp
-            edge_type_loss = - edge_type_loss
+        # edge type cross entropy balanced
+        n_edges = [dataset_info(self.params['dataset'])['loss_edge_weights']]  # added a dimension
+        loss_batchEdge = tf.reduce_sum(tf.log(self.ops['edges_type_pred'] + SMALL_NUMBER) * gt_edges_type_pred,
+                                       axis=[2, 3])
+        edge_type_loss = -tf.reduce_sum(loss_batchEdge * n_edges, axis=-1)
 
         # sum losses
         self.ops['cross_entropy_losses'] = edge_loss + edge_type_loss
@@ -819,16 +794,21 @@ class MolGVAE(ChemModel):
         v = self.placeholders['num_vertices']
         ls_dim = self.params['latent_space_size']
         kl_trade_off_lambda =self.placeholders['kl_trade_off_lambda']
+
         # Edge loss
         self.ops["edge_loss"] = self.ops['cross_entropy_losses']
+
         # KL loss
         kl_loss = 1 + self.ops['logvariance'] - tf.square(self.ops['mean']) - tf.exp(self.ops['logvariance'])
         kl_loss = tf.reshape(kl_loss, [-1, v, ls_dim]) * self.ops['graph_state_mask']
         self.ops['kl_loss'] = -0.5 * tf.reduce_sum(kl_loss, [1,2])
-        # Node symbol loss
-        self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) *
-                                                      self.placeholders['node_symbols'], axis=[1, 2])
 
+        # Node symbol loss
+        loss_node_weights = [[dataset_info(self.params['dataset'])['loss_node_weights']]]  # added two dimension [1, 1, t_nodes]
+        node_symbol_loss = tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
+        self.ops['node_symbol_loss'] = -tf.reduce_sum(node_symbol_loss * loss_node_weights, axis=[1, 2])
+
+        # Other statistics
         latent_node_symbol = tf.cast(tf.not_equal(tf.argmax(self.ops['latent_node_symbols'], axis=-1),
                                           tf.argmax(self.placeholders['node_symbols'], axis=-1)),
                                      tf.float32)
@@ -885,7 +865,7 @@ class MolGVAE(ChemModel):
         tf.summary.scalar('mean_kl_loss', self.ops['mean_kl_loss'])
         tf.summary.scalar('mean_total_qed_loss', self.ops['mean_total_qed_loss'])
         tf.summary.scalar('loss', self.ops['total_qed_loss'])
-        tf.summary.scalar('reconstruction', self.ops['reconstruction'])
+        tf.summary.scalar('reconstruction', tf.reduce_mean(tf.cast(tf.equal(mols_errors, 0), tf.float32)))
         tf.summary.scalar('node_pred_error', self.ops['node_pred_error'])
         tf.summary.scalar('edge_pred_error', self.ops['edge_pred_error'])
         tf.summary.scalar('edge_type_pred_error', self.ops['edge_type_pred_error'])

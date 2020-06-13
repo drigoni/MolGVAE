@@ -26,7 +26,6 @@ geometry_numbers = [3, 4, 5, 6]  # triangle, square, pentagon, hexagon
 bond_dict = {'SINGLE': 0, 'DOUBLE': 1, 'TRIPLE': 2, "AROMATIC": 3}
 number_to_bond = {0: Chem.rdchem.BondType.SINGLE, 1: Chem.rdchem.BondType.DOUBLE,
                  2: Chem.rdchem.BondType.TRIPLE, 3: Chem.rdchem.BondType.AROMATIC}
-
 def dataset_info(dataset):
     if dataset == 'qm9':
         values={'atom_types': ["H", "C", "N", "O", "F"],
@@ -428,7 +427,8 @@ class MLP_norm(object):
         acts = inputs
         for W, b in zip(self.params["weights"], self.params["biases"]):
             hid = tf.matmul(acts, tf.nn.dropout(W, self.dropout_keep_prob)) + b
-            hid_norm = tf.layers.batch_normalization(hid, axis=-1, training=is_training)
+            hid_norm = tf.contrib.layers.batch_norm(hid, is_training=is_training)
+            # hid_norm = tf.layers.batch_normalization(hid, axis=-1, training=is_training)
             acts = self.activation_function(hid_norm)
         last_hidden = hid_norm
         return last_hidden

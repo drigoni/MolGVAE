@@ -114,8 +114,8 @@ class MolGVAE(ChemModel):
     def prepare_specific_graph_model(self) -> None:
         # params
         h_dim_en = self.params['hidden_size_encoder']
-        h_dim_de = h_dim_en + 100
         ls_dim = self.params['latent_space_size']
+        h_dim_de = ls_dim + 100
         expanded_h_dim = h_dim_de + h_dim_en + 1  # 1 for focus bit
         hist_dim = self.histograms['hist_dim']
 
@@ -195,7 +195,7 @@ class MolGVAE(ChemModel):
                             if self.params['use_edge_bias']:
                                 self.weights['edge_biases' + scope + str(iter_idx)] = tf.Variable(
                                     np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32), name='edge_weights_bias')
-                            self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
+                            self.weights['mlp' + scope + str(iter_idx)] = MLP_norm(new_h_dim,
                                                                               new_h_dim,
                                                                               [new_h_dim, new_h_dim],
                                                                               self.placeholders['out_layer_dropout_keep_prob'],
@@ -204,12 +204,12 @@ class MolGVAE(ChemModel):
         with tf.name_scope('distribution_vars'):
             # Weights final part encoder. They map all nodes in one point in the latent space
             input_size_distribution = h_dim_en * (self.params['num_timesteps'] + 1)
-            self.weights['mean_MLP'] = MLP(input_size_distribution, ls_dim,
+            self.weights['mean_MLP'] = MLP_norm(input_size_distribution, ls_dim,
                                            [input_size_distribution],
                                            self.placeholders['out_layer_dropout_keep_prob'],
                                            activation_function=tf.nn.leaky_relu,
                                            name='mean_MLP')
-            self.weights['logvariance_MLP'] = MLP(input_size_distribution, ls_dim,
+            self.weights['logvariance_MLP'] = MLP_norm(input_size_distribution, ls_dim,
                                                   [input_size_distribution],
                                                   self.placeholders['out_layer_dropout_keep_prob'],
                                                   activation_function=tf.nn.leaky_relu,
@@ -217,13 +217,13 @@ class MolGVAE(ChemModel):
 
 
         with tf.name_scope('gen_nodes_vars'):
-            self.weights['histogram_MLP'] = MLP(ls_dim + 2*hist_dim, 100,
+            self.weights['histogram_MLP'] = MLP_norm(ls_dim + 2*hist_dim, 100,
                                                [],
                                                self.placeholders['out_layer_dropout_keep_prob'],
                                                activation_function=tf.nn.leaky_relu,
                                                name='histogram_MLP')
             # The weights for generating nodel symbol logits
-            self.weights['node_symbol_MLP'] = MLP(h_dim_de, self.params['num_symbols'],
+            self.weights['node_symbol_MLP'] = MLP_norm(h_dim_de, self.params['num_symbols'],
                                                   [h_dim_de, h_dim_de],
                                                   self.placeholders['out_layer_dropout_keep_prob'],
                                                   activation_function=tf.nn.leaky_relu,
@@ -415,8 +415,8 @@ class MolGVAE(ChemModel):
         tf.summary.histogram("sampled_atoms", self.ops['sampled_atoms'])
 
     def train_procedure(self):
-        h_dim_de = self.params['hidden_size_encoder'] + 100
         latent_space_dim = self.params['latent_space_size']
+        h_dim_de = latent_space_dim + 100
         hist_dim = self.histograms['hist_dim']
         num_symbols = self.params['num_symbols']
         batch_size = tf.shape(self.ops['z_sampled'])[0]
@@ -453,7 +453,8 @@ class MolGVAE(ChemModel):
 
 
     def gen_rec_procedure(self):
-        h_dim_de = self.params['hidden_size_encoder'] + 100
+        latent_space_dim = self.params['latent_space_size']
+        h_dim_de = latent_space_dim + 100
         num_symbols = self.params['num_symbols']
         batch_size = tf.shape(self.ops['z_sampled'])[0]
 
@@ -479,7 +480,8 @@ class MolGVAE(ChemModel):
 
 
     def for_each_molecula(self, idx_sample, atoms, init_vertices_all, fx_prob_all):
-        h_dim_de = self.params['hidden_size_encoder'] + 100
+        latent_space_dim = self.params['latent_space_size']
+        h_dim_de = latent_space_dim + 100
         num_symbols = self.params['num_symbols']
         v = self.placeholders['num_vertices']  # bucket size dimension, not all time the real one.
         current_hist = self.placeholders['hist'][idx_sample]
@@ -725,7 +727,8 @@ class MolGVAE(ChemModel):
     def generate_edges(self, idx, edges_pred, edges_type_pred, valences):
         v = self.placeholders['num_vertices']
         h_dim_en = self.params['hidden_size_encoder']
-        h_dim_de = h_dim_en + 100
+        latent_space_dim = self.params['latent_space_size']
+        h_dim_de = latent_space_dim + 100
         batch_size = tf.shape(self.ops['latent_node_symbols'])[0]
 
         edges_val_req = [i+1 for i in range(0, self.num_edge_types)]

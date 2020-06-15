@@ -115,13 +115,16 @@ def preprocess(raw_data, dataset):
             if len(edges) <= 0:
                 print('Error. Molecule with len(edges) <= 0')
                 continue
-            processed_data[section].append({
+            tmp_dict = {
                 'targets': [[QED]],
                 'graph': edges,
                 'node_features': nodes,
                 'smiles': smiles,
                 'hist': hist
-            })
+            }
+            incr_node = utils.incr_node(tmp_dict, dataset)
+            tmp_dict.update({'incr_node': incr_node})
+            processed_data[section].append(tmp_dict)
             all_smiles.append(smiles)
             if file_count % 1000 == 0:
                 print('Finished processing: %d' % file_count, end='\r')

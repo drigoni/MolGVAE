@@ -122,10 +122,14 @@ class ChemModel(object):
                 self.tb_writer_train.add_graph(self.graph)
             self.ops['summary'] = tf.summary.merge_all()
 
+            # first the number fo the first epoch
+            self.start_epoch = 1
             # Restore/initialize variables:
             restore_file = args.get('--restore')
             if restore_file is not None:
                 self.restore_model(restore_file)
+                tmp_epoch = args.get('--restore_n')
+                self.start_epoch = int(tmp_epoch) + 1 if tmp_epoch is not None else 1
             else:
                 self.initialize_model()
 
@@ -245,21 +249,29 @@ class ChemModel(object):
         # for i in grads_and_vars:
         #     print(i[0])
 
+        # grads_and_vars = [(tf.where(tf.is_nan(grad), tf.zeros_like(grad), grad), val) for grad, val in grads_and_vars]
+
         clipped_grads = []
         grads_for_display = []
         grads_for_display2 = []
         for grad, var in grads_and_vars:
             tf.summary.histogram(var.name, var)
             if grad is not None:
+                tmp_print = tf.Print(grad, [var.name,
+                                            tf.reduce_mean(grad),
+                                            tf.reduce_mean(var),
+                                            tf.reduce_mean(self.ops['logvariance']),
+                                            tf.reduce_mean(self.ops['mean']),
+                                            tf.reduce_mean(self.ops['kl_loss'])],
+                                    message="grad", summarize=1000)  # TODO: pr
                 tmp_grad = tf.clip_by_norm(grad, self.params['clamp_gradient_norm'])
                 clipped_grads.append((tmp_grad, var))
                 grads_for_display.append((tmp_grad, var))
-                grads_for_display2.append(grad)
-                tf.summary.histogram(var.name + '_grad_clip', tmp_grad)
+                grads_for_display2.append(tmp_grad)
             else:
                 tmp_grad = grad
                 clipped_grads.append((tmp_grad, var))
-                tf.summary.histogram(var.name + '_grad_clip', 0)
+
 
         self.ops['grads']= grads_for_display
         self.ops['grads2'] = grads_for_display2
@@ -425,7 +437,7 @@ class ChemModel(object):
         log_to_save = []
         total_time_start = time.time()
         with self.graph.as_default():
-            for epoch in range(1, self.params['num_epochs'] + 1):
+            for epoch in range(self.start_epoch, self.params['num_epochs'] + 1):
                 if self.params['generation'] == 0:
                     print("========== EPOCH %i =================" % epoch)
      

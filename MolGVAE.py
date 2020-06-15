@@ -10,6 +10,7 @@ Options:
     --config CONFIG             Hyperparameter configuration dictionary (in JSON format)
     --data_dir NAME             Data dir name
     --restore FILE              File to restore weights from.
+    --restore_n NAME            Epoch to restore
     --freeze-graph-model        Freeze weights of graph model components
     --restrict_data NAME        [0,1] Load only a subset of the entire dataset
 """
@@ -197,7 +198,7 @@ class MolGVAE(ChemModel):
                                     np.zeros([self.num_edge_types, 1, new_h_dim]).astype(np.float32), name='edge_weights_bias')
                             self.weights['mlp' + scope + str(iter_idx)] = MLP(new_h_dim,
                                                                               new_h_dim,
-                                                                              [new_h_dim, new_h_dim],
+                                                                              [new_h_dim],
                                                                               self.placeholders['out_layer_dropout_keep_prob'],
                                                                               activation_function=tf.nn.leaky_relu)
 
@@ -212,9 +213,15 @@ class MolGVAE(ChemModel):
             self.weights['logvariance_MLP'] = MLP(input_size_distribution, ls_dim,
                                                   [input_size_distribution],
                                                   self.placeholders['out_layer_dropout_keep_prob'],
-                                                  activation_function=tf.nn.leaky_relu,
-                                                  name='logvariance_MLP')
+                                                  activation_function=tf.nn.relu,
+                                                  name='logvariance_MLP',
+                                                  init_function=tf.zeros)  # insight
 
+            #self.weights['distribution_MLP'] = MLP(input_size_distribution, 2*ls_dim,
+            #                                      [input_size_distribution],
+            #                                      self.placeholders['out_layer_dropout_keep_prob'],
+            #                                      activation_function=tf.nn.relu,
+            #                                      name='logvariance_MLP')  # insight
 
         with tf.name_scope('gen_nodes_vars'):
             self.weights['histogram_MLP'] = MLP(ls_dim + 2*hist_dim, 100,
@@ -224,7 +231,7 @@ class MolGVAE(ChemModel):
                                                name='histogram_MLP')
             # The weights for generating nodel symbol logits
             self.weights['node_symbol_MLP'] = MLP(h_dim_de, self.params['num_symbols'],
-                                                  [h_dim_de, h_dim_de],
+                                                  [h_dim_de],
                                                   self.placeholders['out_layer_dropout_keep_prob'],
                                                   activation_function=tf.nn.leaky_relu,
                                                   name='node_symbol_MLP')
@@ -233,12 +240,12 @@ class MolGVAE(ChemModel):
             # gen edges
             input_size_edge = 4*(h_dim_en + h_dim_de)
             self.weights['edge_gen_MLP'] = MLP(input_size_edge, 1,
-                                               [input_size_edge, h_dim_de],
+                                               [h_dim_de],
                                                self.placeholders['out_layer_dropout_keep_prob'],
                                                activation_function=tf.nn.leaky_relu,
                                                name='edge_gen_MLP')
             self.weights['edge_type_gen_MLP'] = MLP(input_size_edge, self.num_edge_types,
-                                                    [h_dim_de],
+                                                    [],
                                                     self.placeholders['out_layer_dropout_keep_prob'],
                                                     activation_function=tf.nn.leaky_relu,
                                                     name='edge_type_gen_MLP')
@@ -346,8 +353,7 @@ class MolGVAE(ChemModel):
                     if self.params['use_edge_bias']:
                         m += self.weights['edge_biases'+scope_name+str(iter_idx)][edge_type]            # [b, v, h]
                     # apply non linearity
-                    m = tf.nn.leaky_relu(m)
-                    m = tf.reshape(m, [-1, v, h_dim])                                                   # [b, v, h]
+                    m = tf.reshape(tf.nn.leaky_relu(m), [-1, v, h_dim])   # [b, v, h]  with softmax
                     # collect the messages from other vertices to each vertice
                     if edge_type == 0:
                         acts = tf.matmul(adj[edge_type], m)
@@ -368,12 +374,21 @@ class MolGVAE(ChemModel):
 
     def compute_mean_and_logvariance(self):
         h_dim = self.params['hidden_size_encoder']
+        ls_dim = self.params['latent_space_size']
         reshped_last_h = tf.reshape(self.ops['final_node_representations'][1], [-1, h_dim * (self.params['num_timesteps'] + 1)])
         mean = self.weights['mean_MLP'](reshped_last_h, self.placeholders['is_training'])
         logvariance = self.weights['logvariance_MLP'](reshped_last_h, self.placeholders['is_training'])
+        #distributions_value = self.weights['distribution_MLP'](reshped_last_h, self.placeholders['is_training'])
+        #mean = distributions_value[:, 0:ls_dim]
+        #logvariance = distributions_value[:, ls_dim:]
+
+        # logvariance = tf.Print(logvariance, [logvariance, tf.reduce_mean(logvariance)], message="Logvariance: ", summarize=1000)  # TODO: pr
+        # logvariance = tf.Print(logvariance, [tf.exp(logvariance), tf.reduce_mean(tf.exp(logvariance))], message="Variance: ", summarize=1000)  # TODO: pr
+        # logvariance = self.weights['logvariance_MLP'].print(logvariance)
 
         self.ops['mean'] = mean
         self.ops['logvariance'] = logvariance
+
         tf.summary.histogram("mean", self.ops['mean'])
         tf.summary.histogram("logvariance", self.ops['logvariance'])
         tf.summary.histogram("variance", tf.exp(self.ops['logvariance']))
@@ -913,7 +928,8 @@ class MolGVAE(ChemModel):
             chosen_bucket_size = bucket_sizes[chosen_bucket_idx]
 
             # calc incremental hist for node
-            incr_hist, incr_diff_hist, incr_node_mask = incr_node(d, self.params['dataset'])
+            # incr_hist, incr_diff_hist, incr_node_mask = incr_node(d, self.params['dataset'])
+            incr_hist, incr_diff_hist, incr_node_mask = d['incr_node']
 
             # total number of nodes in this data point
             n_active_nodes = len(d["node_features"])

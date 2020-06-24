@@ -38,10 +38,14 @@ def dataset_info(dataset):
                 'n_edges': [6788282, 1883788, 222444, 63914],
                 'n_nodes': [0, 729895, 120522, 161809, 2828],
                }
-        values['loss_node_weights'] = [max(values['n_nodes']) / i if i > 0 else 1
+        # values['loss_node_weights'] = [max(values['n_nodes']) / i if i > 0 else 1
+        #                                for i in values['n_nodes']]
+        values['loss_node_weights'] = [1 if i > 0 else 1
                                        for i in values['n_nodes']]
         edges_to_consider = values['n_edges'][1:]  # the first position represent the non-present edges
-        values['loss_edge_weights'] = [max(edges_to_consider) / i if i > 0 else 1
+        #values['loss_edge_weights'] = [max(edges_to_consider) / i if i > 0 else 1
+        #                               for i in edges_to_consider]
+        values['loss_edge_weights'] = [1 if i > 0 else 1
                                        for i in edges_to_consider]
         return values
     elif dataset == 'zinc':
@@ -60,10 +64,14 @@ def dataset_info(dataset):
                 'n_nodes': [11251, 3758488, 37721, 70303, 0, 799, 1337, 553583, 67890, 21442,
                             487609, 63815, 1980, 24630],
                }
-        values['loss_node_weights'] = [max(values['n_nodes']) / i if i > 0 else 1
+        # values['loss_node_weights'] = [max(values['n_nodes']) / i if i > 0 else 1
+        #                                for i in values['n_nodes']]
+        values['loss_node_weights'] = [1 if i > 0 else 1
                                        for i in values['n_nodes']]
         edges_to_consider = values['n_edges'][1:]       # the first position represent the non-present edges
-        values['loss_edge_weights'] = [max(edges_to_consider) / i if i > 0 else 1
+        #values['loss_edge_weights'] = [max(edges_to_consider) / i if i > 0 else 1
+        #                               for i in edges_to_consider]
+        values['loss_edge_weights'] = [1 if i > 0 else 1
                                        for i in edges_to_consider]
         return values
     else:

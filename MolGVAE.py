@@ -227,7 +227,6 @@ class MolGVAE(ChemModel):
         self.placeholders['histograms'] = tf.placeholder(tf.int32, (None, hist_dim), name="histograms")
         self.placeholders['n_histograms'] = tf.placeholder(tf.int32, (None), name="n_histograms")
         self.placeholders['hist'] = tf.placeholder(tf.int32, (None, hist_dim), name="hist")
-        #self.weights['mlp_hist'] = MLP(h_dim_en + 2*hist_dim, h_dim_en, [h_dim_en + 2*hist_dim, h_dim_en], 1)
         self.weights['latent_space_dec0'] = tf.Variable(glorot_init([h_dim_en + 2*hist_dim, h_dim_en]))
         self.weights['latent_space_bias_dec0'] = tf.Variable(np.zeros([1, h_dim_en]).astype(np.float32))
 
@@ -474,7 +473,6 @@ class MolGVAE(ChemModel):
         current_sample_hist = self.placeholders['hist'][idx_sample]
         current_sample_hist_casted = tf.cast(current_sample_hist, dtype=tf.float32)
         current_sample_z = self.ops['z_sampled'][idx_sample][idx_atom]
-        # node = current_sample_z
 
         # concatenation of the latent space point with the difference between the sampled histogram and the current histogram
         current_hist_casted = tf.cast(updated_hist, dtype=tf.float32)
@@ -485,34 +483,20 @@ class MolGVAE(ChemModel):
 
         # build a node with NN (K)
         hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
-        #hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
 
-        # node = tf.Print(node, [tf.shape(node), node], message="node_latent_space ", summarize=1000)  # TODO: pr
         fx_logit = tf.squeeze(tf.matmul(node_prob, self.weights['node_symbol_weights']) + self.weights['node_symbol_biases'])
         if self.params['use_mask']:
             fx_logit, mask = self.mask_mols(fx_logit, hist_diff_pos)
         fx_prob = tf.nn.softmax(fx_logit)
-        # fx_prob = tf.Print(fx_prob, [fx_prob], message="training sampling: probs after masking ", summarize=1000)  # TODO: pr
-
-        # test the mask
-        #test = tf.cond(tf.reduce_any(mask),
-        #                       lambda: mask,
-        #                       lambda: tf.ones_like(mask))
-        #test = tf.cast(test, tf.float32)
-        #val = tf.argmax(self.placeholders['node_symbols'][idx_sample][idx_atom])
-        #self.ops['assert'] = tf.Assert(tf.equal(test[val], 1), [test, val])
-
 
         # update the histogram
         probs_value = tf.cond(self.placeholders['use_teacher_forcing_nodes'],
                               lambda: self.placeholders['node_symbols'][idx_sample][idx_atom],
                               lambda: fx_prob)
 
-        #probs_value = tf.Print(probs_value, [probs_value], message="training: probs_value", summarize=1000)  # TODO: pr
         s_atom = self.sample_atom(probs_value, True)
-        # s_atom = tf.Print(s_atom, [s_atom], message="training: s_atom ", summarize=1000)  # TODO: pr
         current_new_hist = self.update_hist(updated_hist, s_atom)
         #current_new_hist = tf.Print(current_new_hist, [current_new_hist], message="training: current_new_hist", summarize=1000)  # TODO: pr
 
@@ -533,7 +517,6 @@ class MolGVAE(ChemModel):
 
         # build a node with NN (K)
         hist_emb = tf.nn.tanh(tf.matmul(exp, self.weights['latent_space_dec0']) + self.weights['latent_space_bias_dec0'])
-        # hist_emb = self.weights['mlp_hist'](exp)
         node_prob = tf.concat([tf.expand_dims(current_sample_z, 0), hist_emb], -1)
         node = node_prob
 
@@ -592,7 +575,6 @@ class MolGVAE(ChemModel):
     """
     def case_random_sampling(self):
         max_n = tf.shape(self.placeholders['histograms'])[0]
-        # max_n = tf.Print(max_n, [max_n], message="generate sampling random", summarize=1000)  # TODO: pr
         idx = tf.random_uniform([], maxval=max_n, dtype=tf.int32)
         return self.placeholders['histograms'][idx]
 
@@ -601,7 +583,7 @@ class MolGVAE(ChemModel):
     Sample the id of the atom for a value fo probabilities. 
     In training always apply argmax, while in generation it is possible to choose among distribution or argmax
     """
-    def sample_atom(self, fx_prob, training):
+    def sample_atom(self, fx_prob, training):  # training stand for training_procedure or generation procedure
         if training:
                 idx = tf.argmax(fx_prob, output_type=tf.int32)
         else:
@@ -665,8 +647,8 @@ class MolGVAE(ChemModel):
         # Note: If we use the TF in the node procedure, the sampled atoms are equal to the GT
 
         latent_node_state = self.get_node_embedding_state(self.ops['latent_node_symbols'])
+        # latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"]) #original
 
-        #latent_node_state = self.get_node_embedding_state(self.placeholders["latent_node_symbols"]) #original
         # concat nodes with node symbols and use latent representation as decoder GNN'input
         self.ops["initial_repre_for_decoder"] = filtered_z_sampled = tf.concat([self.ops['initial_nodes_decoder'],
                                                                                 latent_node_state], axis=2)   # [b, v, h + h]
@@ -834,14 +816,6 @@ class MolGVAE(ChemModel):
         return tf.reduce_mean(self.ops["edge_loss"] + self.ops['node_symbol_loss'] + \
                               kl_trade_off_lambda *self.ops['kl_loss'])\
                               + self.params["qed_trade_off_lambda"]*self.ops['total_qed_loss']
-
-    def IoU(self, y_pred, y_true):
-        # van Beers, Floris, et al. "Deep Neural Networks with Intersection over Union Loss for Binary Image Segmentation.
-        # " Proceedings of the 8th International Conference on Pattern Recognition Applications and Methods. 2019.
-        I = tf.reduce_sum(y_pred * y_true, axis=(1, 2))
-        S = tf.reduce_sum(y_pred + y_true, axis=(1, 2))
-        U = S - I
-        return I / U
 
     def gated_regression(self, last_h, regression_gate, regression_transform, hidden_size, projection_weight, projection_bias, v, mask):
         # last_h: [b x v x h]

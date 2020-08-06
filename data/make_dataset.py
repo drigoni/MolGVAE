@@ -22,8 +22,6 @@ import utils
 current_dir = os.path.dirname(os.path.realpath(__file__))
 
 
-# todo: forse è il caso di sistemare questa parte usando lo qm9 per tutti
-# todo: ci sono delle molecole nel zinc che non vengono considerate, dato che sono più complesse e non sono nella lista degli atomi
 # This is a subset of read_qm9() results. It doesn't include smiles with "." or "*" in it
 def readStr_qm9():
     f = open(current_dir + '/qm9.smi', 'r')
@@ -32,6 +30,8 @@ def readStr_qm9():
         line = line.strip()
         L.append(line)
     f.close()
+    np.random.seed(1)
+    np.random.shuffle(L)
     return L
 
 
@@ -46,7 +46,6 @@ def read_zinc():
 
 
 def train_valid_split(dataset):
-    np.random.shuffle(dataset)
     n_mol_out = 0
     n_test = 5000
     test_idx = np.arange(0, n_test)
@@ -157,10 +156,3 @@ if __name__ == "__main__":
 
     raw_data = train_valid_split(data)
     preprocess(raw_data, dataset)
-    #
-    # smile = '[CH3][CH2][OH]'
-    # print("SMILES: ", smile)
-    # m = Chem.MolFromSmiles(smile)
-    # for atom in m.GetAtoms():
-    #     print(atom.GetAtomicNum(), atom.GetSymbol())
-    # print(m.GetBonds()[0].GetBondType())

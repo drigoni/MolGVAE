@@ -83,7 +83,7 @@ class MolGVAE(ChemModel):
                                 18: [0, 2, 4, 6, 8, 10, 12, 14, 16],
                                 20: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
                             },
-                        'num_timesteps': 5,                                    # gnn propagation step
+                        'num_timesteps': 12,                                    # gnn propagation step
                         'hidden_size_decoder': 200,                             # decoder hidden size dimension
                         'hidden_size_encoder': 100,                             # encoder hidden size dimension
                         "kl_trade_off_lambda": 0.05,                             # kl tradeoff originale 0.3
@@ -91,9 +91,9 @@ class MolGVAE(ChemModel):
                         'graph_state_dropout_keep_prob': 1,    
                         "compensate_num": 1,                                    # how many atoms to be added during generation
 
-                        'train_file': 'data/molecules_train_%s.json' % dataset,
-                        'valid_file': 'data/molecules_valid_%s.json' % dataset,
-                        'test_file': 'data/molecules_test_%s.json' % dataset,
+                        'train_file': 'data_ieee/molecules_train_%s.json' % dataset,
+                        'valid_file': 'data_ieee/molecules_valid_%s.json' % dataset,
+                        'test_file': 'data_ieee/molecules_test_%s.json' % dataset,
 
                         'try_different_starting': True,
                         "num_different_starting": 6,
@@ -101,8 +101,8 @@ class MolGVAE(ChemModel):
                         'reconstruction_en': 20,            # number of encoding in reconstruction
                         'reconstruction_dn': 1,             # number of decoding in reconstruction
 
-                        'use_graph': False,                 # use gnn
-                        'use_gin': True,                    # use gin as gnn
+                        'use_graph': True,                  # use gnn
+                        'use_gin': False,                   # use gin as gnn  #todo: default to false
                         'gin_epsilon': 0,                   # gin epsilon
                         "label_one_hot": False,             # one hot label or not
                         "multi_bfs_path": False,            # whether sample several BFS paths for each molecule
@@ -114,7 +114,6 @@ class MolGVAE(ChemModel):
                         "truncate_distance": 10,
                         "use_gpu": True,
                         "use_rec_multi_threads": True,
-                        "use_set_losses": False,            # whether to use crossentropy or a loss over sets of nodes
                         })
 
         return params
@@ -792,18 +791,6 @@ class MolGVAE(ChemModel):
         # Node symbol loss
         self.ops['node_symbol_loss'] = -tf.reduce_sum(tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) *
                                                       self.placeholders['node_symbols'], axis=[1, 2])
-
-        if self.params['use_set_losses']:
-            # first version
-            # iou_values = self.IoU(self.ops['latent_node_symbols'], self.placeholders['node_symbols'])
-            # selection = tf.one_hot(tf.argmax(self.ops['node_symbol_prob'], 2), self.params['num_symbols'],
-            #           name='latent_node_symbols') * self.ops['graph_state_mask']
-            #iou_values = self.IoU(tf.cast(selection, tf.float32), self.placeholders['node_symbols'])
-            # self.ops['node_symbol_loss'] = self.ops['node_symbol_loss'] * (1 - iou_values)
-            # second version
-            self.ops['node_symbol_loss'] = 1 - self.IoU(self.ops['node_symbol_prob'], self.placeholders['node_symbols'])
-
-
 
         self.ops['node_loss_error'] = - tf.log(self.ops['node_symbol_prob'] + SMALL_NUMBER) * self.placeholders['node_symbols']
         self.ops['node_pred_error'] = tf.reduce_sum(tf.cast(tf.not_equal(self.ops['latent_node_symbols'], self.placeholders['node_symbols']), tf.float32))

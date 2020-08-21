@@ -36,7 +36,8 @@ class HistManager:
         print("END in time: " + str(end - start))
 
     '''
-    Return a dictionary where the key is the score, and the value is a list of value. es {7:[7,7,7,7]}
+    Return a dictionary where the key is the score, and the value is a list of value. es {7:[7,7,7,7]} 
+    Note that all the values are repeated.
     Input: a list of histograms
     Output: the dictionary
     '''
@@ -71,11 +72,12 @@ class HistManager:
         return ord_keys
 
     '''
-    Given a dictionary of histograms, it create the compatible one.
-    Es: {7: [7,7,8,10,33,33,33]}
+    Given a dictionary of histograms, it create the compatible one. 
+    Note that it is a list of list, where for each histogram there are all the compatible histogram.
+    Es: {7: [7,7,8,10,33,33,33]} 
     '''
     @staticmethod
-    def makeDictCompatible(data: defaultdict, length_hist: int, max_valence: int) -> defaultdict:
+    def makeDictCompatible(data: defaultdict, length_hist: int, max_valence: int) -> defaultdict: # todo verifica
         diz_comp = defaultdict(list)
         ord_keys = HistManager.getOrderedKeys(data)
         for i in range(len(ord_keys)):
@@ -201,6 +203,7 @@ class HistManager:
         plt.clf()
         # plt.figure(figsize=[30, 20])
         plt.plot(range(self.n_hist), y_cum)
+        plt.title(name + " Compatible Histograms")
         plt.savefig(name + "_compatible.png")
 
     def plotHist(self, name):
@@ -210,6 +213,7 @@ class HistManager:
         plt.clf()
         # plt.figure(figsize=[30, 20])
         plt.plot(range(self.n_hist), y_hist)
+        plt.title(name + " Unique Histograms")
         plt.savefig(name + "_hist.png")
 
     def plotCumulative(self, name):
@@ -221,7 +225,8 @@ class HistManager:
         plt.plot(range(self.n_hist), sorted(y_hist, reverse=True))
         plt.xlabel("Histogram ordered by compatibility")
         plt.ylabel("Number of molecules")
-        plt.savefig(name + "_cumulative.png")
+        plt.title(name + " Sorted Comp. Histograms")
+        plt.savefig(name + "_sortedCompatible.png")
 
     # other tests
     def test1(self):
@@ -292,14 +297,6 @@ if __name__ == "__main__":
     valid_file = full_path + "molecules_valid_" + dataset + ".json"
     train_file = full_path + "molecules_train_" + dataset + ".json"
 
-    # default params
-    if dataset == "qm9":
-        length_hist = 4
-        max_valence = 9
-    else:
-        length_hist = 6
-        max_valence = 34
-
     # loading data
     print("Loading data from %s" % test_file)
     with open(test_file, 'r') as f:
@@ -320,6 +317,16 @@ if __name__ == "__main__":
     mols.extend(data3)
     all = [mol['hist'] for mol in mols]
     print("Number of molecules: %i" % (len(mols)))
+
+    # default params
+    # if dataset == "qm9":
+    #     length_hist = 4
+    #     max_valence = 9
+    # else:
+    #     length_hist = 6
+    #     max_valence = 34
+    length_hist = len(all[0])
+    max_valence = max([max(i) for i in all])
 
     # search
     minSmile = 100000000

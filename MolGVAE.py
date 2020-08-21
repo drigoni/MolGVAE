@@ -23,6 +23,7 @@ import time
 import tensorflow as tf
 from rdkit import Chem
 import os
+from rdkit.Chem import QED
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'  # 0, 1, 2, 3
 
@@ -1003,7 +1004,7 @@ class MolGVAE(ChemModel):
     """
     def get_dynamic_feed_dict(self, elements, latent_node_symbol, incre_adj_mat, num_vertices,
                               distance_to_others, overlapped_edge_dense, node_sequence, edge_type_masks, edge_masks,
-                              random_normal_states, is_generative):
+                              random_normal_states, is_generative, sampled_idx, values):
         if incre_adj_mat is None:
             incre_adj_mat = np.zeros((1, 1, self.num_edge_types, 1, 1))
             distance_to_others = np.zeros((1, 1, 1))
@@ -1013,14 +1014,6 @@ class MolGVAE(ChemModel):
             edge_masks = np.zeros((1, 1, 1))
             latent_node_symbol = np.zeros((1, 1, self.params["num_symbols"]))
 
-        prob = self.histograms['filter'][1][int(num_vertices)]
-        values = self.histograms['filter'][0][int(num_vertices)]
-        prob_sum = np.sum(prob)
-        if prob_sum == 0:
-            sampled_idx = np.random.choice(len(self.histograms['train'][0]))
-            values = self.histograms['train'][1]
-        else:
-            sampled_idx = np.random.choice(len(self.histograms['train'][0]), p=prob)
         return {
             self.placeholders['use_teacher_forcing_nodes']: False,
             self.placeholders['is_generative']: is_generative,
@@ -1042,8 +1035,8 @@ class MolGVAE(ChemModel):
             self.placeholders['node_sequence']: node_sequence,  # [1, 1, v]
             self.placeholders['edge_type_masks']: edge_type_masks,  # [1, 1, e, v]
             self.placeholders['edge_masks']: edge_masks,  # [1, 1, v]
-            self.placeholders['histograms']: self.histograms['train'][0],
-            self.placeholders['n_histograms']: values,
+            self.placeholders['histograms']: self.histograms['train'][0],  # unique set of histograms
+            self.placeholders['n_histograms']: values,  # frequencies for sampling
             self.placeholders['hist']: [self.histograms['train'][0][sampled_idx]],
         }
 
@@ -1211,32 +1204,94 @@ class MolGVAE(ChemModel):
     Optimization in latent space. Generate one molecule for each optimization step.
     """
     def optimization_over_prior(self, random_normal_states, num_vertices, generated_all_similes, elements, count, is_generating):
+        current_smiles = []
         # record how many optimization steps are taken
         step=0
+        # fix the choice of the first histogram
+        values_hist = self.histograms['filter'][0][int(num_vertices)]  # frequencies
+        prob = self.histograms['filter'][1][int(num_vertices)]
+        prob_sum = np.sum(prob)
+        if prob_sum == 0:
+            sampled_idx_hist = np.random.choice(len(self.histograms['train'][0]))
+            values_hist = self.histograms['train'][1]
+        else:
+            sampled_idx_hist = np.random.choice(len(self.histograms['train'][0]), p=prob)
+
         # generate a new molecule
-        self.generate_graph_with_state(random_normal_states, num_vertices, generated_all_similes, elements, step, count, is_generating)
+        current_smiles.append(self.generate_graph_with_state(random_normal_states, num_vertices, generated_all_similes, elements, step, count, is_generating, sampled_idx_hist, values_hist))
         fetch_list = [self.ops['derivative_z_sampled'], self.ops['qed_computed_values'], self.ops['l2_loss']]
         for _ in range(self.params['optimization_step']):   
             # get current qed and derivative
             batch_feed_dict = self.get_dynamic_feed_dict(elements, None, None, num_vertices, None,
                                        None, None, None, None,
-                                       random_normal_states, is_generating)
+                                       random_normal_states, is_generating, sampled_idx_hist, values_hist)
             derivative_z_sampled, qed_computed_values, l2_loss= self.sess.run(fetch_list, feed_dict=batch_feed_dict)
+            tmp_mol = Chem.MolFromSmiles(current_smiles[step])
+            if tmp_mol is not None:
+                print("Optimization: ", step, " - ", "Pred: ", qed_computed_values, QED.qed(tmp_mol), end="\n")
+                AllChem.Compute2DCoords(tmp_mol)
+                from rdkit.Chem import Draw
+                Draw.MolToFile(tmp_mol, 'results_ieee/optimization_' + str(step) + '.png')
+            else:
+                print("Optimization: ", step, " - ", "None molecule warning", end="\n")
             # update the states
-            random_normal_states=self.gradient_ascent(random_normal_states, 
-                                                      derivative_z_sampled[0])
+            random_normal_states = self.gradient_ascent(random_normal_states, derivative_z_sampled[0])
             # generate a new molecule
             step+=1
-            self.generate_graph_with_state(random_normal_states, num_vertices,
-                                           generated_all_similes, elements, step, count, is_generating)
+            current_smiles.append(self.generate_graph_with_state(random_normal_states, num_vertices, generated_all_similes, elements, step, count, is_generating, sampled_idx_hist, values_hist))
+        generated_all_similes.append(current_smiles)
+        n_gen_max = self.params['number_of_generation']
+        n_gen_cur = len(generated_all_similes)
+        print("Molecules generated: ", n_gen_cur, end='\r')
+        # give and indication about the number of generated molecules
+        if (n_gen_cur % (n_gen_max / 100.0)) == 0:
+            suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
+            mask = "_masked" if self.params['use_mask'] else "_noMask"
+            log_dir = self.params['log_dir']
+            priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
+                          + mask + suff + ".txt"
+            f = open(priors_file, "a")
+            f.writelines("Number of generated molecules: " + str(n_gen_cur) + "\n")
+            f.close()
+        if n_gen_cur >= n_gen_max and self.params['optimization_step'] == 0:
+            suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
+            mask = "_masked" if self.params['use_mask'] else "_noMask"
+            log_dir = self.params['log_dir']
+            priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
+                          + mask + suff + ".txt"
+            generated = np.reshape(np.array(generated_all_similes).flatten().tolist(), (1000, -1))
+            f = open(priors_file, "w")
+            for line in generated:
+                for res in line:
+                    f.write(res)
+                    f.write(";,;")
+                f.write("\n")
+            f.close()
+            print("Generation done")
+            exit(0)
+        if n_gen_cur >= n_gen_max and self.params['optimization_step'] > 0:
+            suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
+            mask = "_masked" if self.params['use_mask'] else "_noMask"
+            log_dir = self.params['log_dir']
+            priors_file = log_dir + "/" + str(dataset) + "_decoded_optimized_generation_" + str(self.params["kl_trade_off_lambda"])\
+                          + mask + suff + ".txt"
+            generated = generated_all_similes
+            f = open(priors_file, "w")
+            for line in generated:
+                for res in line:
+                    f.write(res)
+                    f.write(";,;")
+                f.write("\n")
+            f.close()
+            print("Generation done")
+            exit(0)
         return random_normal_states
 
     def generate_graph_with_state(self, random_normal_states, num_vertices,
-                                  generated_all_similes, elements, step, count, is_generating):
-        # Get back node symbol predictions
+                                  generated_all_similes, elements, step, count, is_generating, sampled_idx_hist, values_hist):
         # Prepare dict
         node_symbol_batch_feed_dict = self.get_dynamic_feed_dict(elements, None, None,
-                                     num_vertices, None, None, None, None, None, random_normal_states, is_generating)
+                                     num_vertices, None, None, None, None, None, random_normal_states, is_generating, sampled_idx_hist, values_hist)
         # Get predicted node probabilities
         [latent_nodes, predicted_node_symbol_prob, real_values] = self.get_node_symbol(node_symbol_batch_feed_dict)
         # Node numbers for each graph
@@ -1279,40 +1334,11 @@ class MolGVAE(ChemModel):
         # nothing generated
         if best_mol is None:
             return
-        generated_all_similes.append(Chem.MolToSmiles(best_mol))
+        # generated_all_similes.append(Chem.MolToSmiles(best_mol))
         # print(Chem.MolToSmiles(best_mol))  # TODO: pr
         # exit(0)  # TODO: exit
+        return Chem.MolToSmiles(best_mol)
 
-        n_gen_max = self.params['number_of_generation']
-        n_gen_cur = len(generated_all_similes)
-        print("Molecules generated: ", n_gen_cur, end='\r')
-        # give and indication about the number of generated molecules
-        if (n_gen_cur % (n_gen_max / 100.0)) == 0:
-            suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
-            mask = "_masked" if self.params['use_mask'] else "_noMask"
-            log_dir = self.params['log_dir']
-            priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
-                          + mask + suff + ".txt"
-            f = open(priors_file, "a")
-            f.writelines("Number of generated molecules: " + str(n_gen_cur) + "\n")
-            f.close()
-
-        if n_gen_cur >= n_gen_max:
-            suff = "_" + self.params['suffix'] if self.params['suffix'] is not None else ""
-            mask = "_masked" if self.params['use_mask'] else "_noMask"
-            log_dir = self.params['log_dir']
-            priors_file = log_dir + "/" + str(dataset) + "_decoded_generation_" + str(self.params["kl_trade_off_lambda"])\
-                          + mask + suff + ".txt"
-            generated = np.reshape(generated_all_similes, (1000, -1))
-            f = open(priors_file, "w")
-            for line in generated:
-                for res in line:
-                    f.write(res)
-                    f.write(";,;")
-                f.write("\n")
-            f.close()
-            print("Generation done")
-            exit(0)
 
     def compensate_node_length(self, elements, bucket_size):
         maximum_length=bucket_size+self.params["compensate_num"]
@@ -1327,7 +1353,7 @@ class MolGVAE(ChemModel):
         (bucketed, bucket_sizes, bucket_at_step) = data
         bucket_counters = defaultdict(int)
         # all generated similes
-        generated_all_similes=[]
+        generated_all_similes = []
         # counter
         count = 0
         # shuffle the lengths
@@ -1344,7 +1370,7 @@ class MolGVAE(ChemModel):
                 # (this is a result that BFS may not make use of all candidate nodes during generation)
                 maximum_length = self.compensate_node_length(elements, bucket_sizes[bucket])
                 # initial state
-                random_normal_states=generate_std_normal(1, maximum_length, self.params['hidden_size_encoder']) # [1, h]
+                random_normal_states = generate_std_normal(1, maximum_length, self.params['hidden_size_encoder']) # [1, h]
                 random_normal_states = self.optimization_over_prior(random_normal_states, maximum_length, generated_all_similes,
                                                                     elements, count, True)
                 count+=1
